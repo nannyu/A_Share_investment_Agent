@@ -52,6 +52,11 @@ cd A_Share_investent_Agent
 
 ```bash
 curl -sSL https://install.python-poetry.org | python3 -
+
+#windows命令
+curl -sSL https://install.python-poetry.org | python -
+# PowerShell原生命令
+(Invoke-WebRequest -Uri https://install.python-poetry.org).Content | python -
 ```
 
 2. Install dependencies:
