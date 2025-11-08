@@ -1,6 +1,7 @@
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 import json
+from typing import Any, Dict
 from src.utils.logging_config import setup_logger
 
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
@@ -24,6 +25,37 @@ def get_latest_message_by_name(messages: list, name: str):
     # Return a dummy message object or raise an error, depending on desired handling
     # For now, returning a dummy message to avoid crashing, but content will be None.
     return HumanMessage(content=json.dumps({"signal": "error", "details": f"Message from {name} not found"}), name=name)
+
+
+def _normalize_macro_news_payload(raw_value: Any) -> Dict[str, Any]:
+    payload = {
+        "index": "沪深300指数",
+        "signal": "neutral",
+        "confidence": 0.5,
+        "score": 50,
+        "summary": "宏观新闻分析不可用。",
+        "key_drivers": ["暂无"],
+        "key_risks": ["暂无"],
+        "actionable_insight": "暂无",
+        "news_count": 0,
+        "from_cache": False,
+    }
+    if isinstance(raw_value, dict):
+        payload.update({
+            "index": raw_value.get("index", payload["index"]),
+            "signal": raw_value.get("signal", payload["signal"]),
+            "confidence": raw_value.get("confidence", payload["confidence"]),
+            "score": raw_value.get("score", payload["score"]),
+            "summary": raw_value.get("summary", payload["summary"]),
+            "key_drivers": raw_value.get("key_drivers", payload["key_drivers"]) or ["暂无"],
+            "key_risks": raw_value.get("key_risks", payload["key_risks"]) or ["暂无"],
+            "actionable_insight": raw_value.get("actionable_insight", payload["actionable_insight"]),
+            "news_count": raw_value.get("news_count", payload["news_count"]),
+            "from_cache": raw_value.get("from_cache", payload["from_cache"]),
+        })
+    elif isinstance(raw_value, str) and raw_value.strip():
+        payload["summary"] = raw_value.strip()
+    return payload
 
 
 @agent_endpoint("portfolio_management", "负责投资组合管理和最终交易决策")
@@ -52,7 +84,8 @@ def portfolio_management_agent(state: AgentState):
 
     show_workflow_status(f"{agent_name}: --- Executing Portfolio Manager ---")
     show_reasoning_flag = state["metadata"]["show_reasoning"]
-    portfolio = state["data"]["portfolio"]
+    data = state["data"]
+    portfolio = data["portfolio"]
 
     # Get messages from other agents using the cleaned list
     technical_message = get_latest_message_by_name(
@@ -82,9 +115,24 @@ def portfolio_management_agent(state: AgentState):
     tool_based_macro_content = tool_based_macro_message.content if tool_based_macro_message else json.dumps(
         {"signal": "error", "details": "Tool-based Macro message missing"})
 
-    # Market-wide news summary from macro_news_agent (already correctly fetched from state["data"])
-    market_wide_news_summary_content = state["data"].get(
-        "macro_news_analysis_result", "大盘宏观新闻分析不可用或未提供。")
+    macro_news_payload = _normalize_macro_news_payload(
+        data.get("macro_news_analysis_result"))
+    macro_news_summary_line = (
+        f"指数: {macro_news_payload['index']} | "
+        f"信号: {macro_news_payload['signal']} | "
+        f"置信度: {macro_news_payload['confidence']:.2f} | "
+        f"分数: {macro_news_payload['score']}"
+    )
+    macro_news_prompt_block = (
+        f"{macro_news_summary_line}\n"
+        f"摘要: {macro_news_payload['summary']}\n"
+        f"关键驱动: {', '.join(macro_news_payload['key_drivers'])}\n"
+        f"关键风险: {', '.join(macro_news_payload['key_risks'])}\n"
+        f"操作提示: {macro_news_payload['actionable_insight']}\n"
+        f"新闻条数: {macro_news_payload.get('news_count', 0)}, "
+        f"来源: {'缓存' if macro_news_payload.get('from_cache') else '实时'}"
+    )
+    market_wide_news_summary_content = macro_news_prompt_block
     # Optional: also try to get the message object for consistency in agent_signals, though data field is primary source
     macro_news_agent_message_obj = get_latest_message_by_name(
         cleaned_messages_for_processing, "macro_news_agent")
@@ -197,8 +245,8 @@ def portfolio_management_agent(state: AgentState):
                     "signal": "hold", "confidence": 1.0},
                 {"agent_name": "macro_analyst_agent",
                     "signal": "neutral", "confidence": 0.0},
-                {"agent_name": "macro_news_agent",
-                    "signal": "unavailable_or_llm_error", "confidence": 0.0}
+                {"agent_name": "market_wide_news_summary(沪深300指数)",
+                    "signal": macro_news_payload["signal"], "confidence": macro_news_payload["confidence"]}
             ],
             "reasoning": "LLM API error. Defaulting to conservative hold based on risk management."
         })
@@ -249,7 +297,7 @@ def portfolio_management_agent(state: AgentState):
 
     return {
         "messages": final_messages_output,
-        "data": state["data"],
+        "data": data,
         "metadata": {
             **state["metadata"],
             f"{agent_name}_decision_details": agent_decision_details_value,
@@ -277,7 +325,7 @@ def format_decision(action: str, quantity: int, confidence: float, agent_signals
         (s for s in agent_signals if s["agent_name"] == "macro_analyst_agent"), None)
     # New market-wide news summary signal from macro_news_agent
     market_wide_news_signal = next(
-        (s for s in agent_signals if s["agent_name"] == "macro_news_agent"), None)
+        (s for s in agent_signals if s["agent_name"] == "market_wide_news_summary(沪深300指数)"), None)
 
     def signal_to_chinese(signal_data):
         if not signal_data:

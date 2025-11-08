@@ -1,195 +1,374 @@
-import os
 import json
+import os
+import re
 from datetime import datetime
-from src.utils.logging_config import setup_logger
-# from langgraph.graph import AgentState # Changed import
-# Added for alignment
+from typing import Any, Dict, List, Optional
+
+from langchain_core.messages import HumanMessage
+
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
-from typing import Dict, Any, List
-from src.utils.api_utils import agent_endpoint  # Added for alignment
-from src.tools.openrouter_config import get_chat_completion
 from src.tools.akshare_cache import get_stock_news
-from langchain_core.messages import HumanMessage  # Added import
+from src.tools.openrouter_config import get_chat_completion
+from src.utils.api_utils import agent_endpoint
+from src.utils.logging_config import setup_logger
 
-# LLM Prompt for analyzing full news data
-LLM_PROMPT_MACRO_ANALYSIS = """你是一名资深的A股市场宏观分析师。请根据以下提供的沪深300指数（代码：000300）当日的**全部新闻数据**，进行深入分析并生成一份专业的宏观总结报告。
+MACRO_INDEX_NAME = "沪深300指数"
+DEFAULT_SUMMARY_TEXT = "宏观新闻分析不可用或尚未生成。"
+ERROR_SUMMARY_TEXT = "宏观新闻分析过程中发生错误"
+MACRO_SUMMARY_PATH = os.path.join("src", "data", "macro_summary.json")
 
-报告应包含以下几个方面：
-1.  **市场情绪解读**：整体评估当前市场情绪（如：乐观、谨慎、悲观），并简述判断依据。
-2.  **热点板块识别**：找出新闻中反映出的1-3个主要热点板块或主题，并说明其驱动因素。
-3.  **潜在风险提示**：揭示新闻中可能隐藏的1-2个宏观层面或市场层面的潜在风险点。
-4.  **政策影响分析**：如果新闻提及重要政策变动，请分析其可能对市场产生的短期和长期影响。
-5.  **综合展望**：基于以上分析，对短期市场走势给出一个简明扼要的展望。
+LLM_PROMPT_MACRO_ANALYSIS = """
+你是一名专注中国A股的宏观分析师。请阅读下面关于“沪深300指数(代码:000300)”的新闻数据，给出结构化的宏观看法。
 
-请确保分析客观、逻辑清晰，语言专业。直接返回分析报告内容，不要包含任何额外说明或客套话。
+请只输出一个 JSON 对象，不要添加额外文字，格式如下（字段顺序保持一致）：
+{
+  "index": "沪深300指数",
+  "signal": "bullish" | "bearish" | "neutral",
+  "confidence": 介于0和1之间的小数,
+  "score": 0到100之间的整数,
+  "summary": "用1-2段中文概括市场整体环境、关键事件与结论",
+  "key_drivers": ["列出1-3条核心利多或推动因素，信息不足可写'暂无'"],
+  "key_risks": ["列出1-3条潜在风险/利空，信息不足可写'暂无'"],
+  "actionable_insight": "给机构投资者的具体可操作提示（中文）"
+}
 
-**当日新闻数据如下：**
-{news_data_json_string}
+要求：
+- 完全基于提供的新闻数据，若新闻极少也要说明信息不足。
+- 如果新闻整体偏利多，请输出 bullish；偏利空输出 bearish；否则输出 neutral。
+- confidence 和 score 必须与信号一致，无法评估时用 0.5 / 50 并说明原因。
+- key_drivers 与 key_risks 不可为空，可用 “暂无” 填充。
+- 请仅返回 Python json.dumps(...) 生成的字符串，确保所有字符串自动转义。
+
+【新闻数据 JSON】
+<<NEWS_JSON>>
 """
 
-# 初始化 logger
-logger = setup_logger('macro_news_agent')
+
+logger = setup_logger("macro_news_agent")
+
+
+def _sanitize_signal(value: Any) -> str:
+    text = str(value).strip().lower()
+    return text if text in {"bullish", "bearish", "neutral"} else "neutral"
+
+
+def _sanitize_confidence(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _sanitize_score(value: Any) -> int:
+    try:
+        return max(0, min(100, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return 50
+
+
+def _sanitize_list(value: Any) -> List[str]:
+    if isinstance(value, list) and value:
+        cleaned = [str(item).strip() or "暂无" for item in value]
+        return cleaned or ["暂无"]
+    return ["暂无"]
+
+
+def _default_macro_payload(summary: str, news_count: int, from_cache: bool, generated_on: str) -> Dict[str, Any]:
+    return {
+        "index": MACRO_INDEX_NAME,
+        "signal": "neutral",
+        "confidence": 0.5,
+        "score": 50,
+        "summary": summary or DEFAULT_SUMMARY_TEXT,
+        "key_drivers": ["暂无"],
+        "key_risks": ["暂无"],
+        "actionable_insight": "暂无",
+        "news_count": news_count,
+        "from_cache": from_cache,
+        "generated_on": generated_on,
+    }
+
+
+def _normalize_llm_json_text(raw: str) -> str:
+    text = raw.strip().lstrip("\ufeff")
+    if not text:
+        return text
+    if text[0] in {"'", '"'} and text[-1] == text[0]:
+        text = text[1:-1].strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].lstrip()
+    text = text.strip()
+    if text.startswith("{") and text.endswith("}"):
+        return text
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and start < end:
+        return text[start:end + 1]
+    cleaned = text.strip().strip("'").strip()
+    if cleaned.startswith("json"):
+        cleaned = cleaned[4:].lstrip()
+    cleaned = cleaned.strip()
+    if cleaned.startswith("{"):
+        candidate = cleaned
+    else:
+        candidate = "{\n" + cleaned
+    if not candidate.rstrip().endswith("}"):
+        candidate = candidate.rstrip().rstrip(",") + "\n}"
+    return candidate
+
+
+def _coerce_to_dict(text: str) -> Dict[str, Any]:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    json_match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
+    if json_match:
+        try:
+            return json.loads(json_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    brace_match = re.search(r"(\{.*\})", text, re.DOTALL)
+    if brace_match:
+        candidate = brace_match.group(1)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+        try:
+            import ast
+
+            value = ast.literal_eval(candidate)
+            if isinstance(value, dict):
+                return value
+        except Exception:
+            pass
+    try:
+        import ast
+
+        value = ast.literal_eval(text)
+        if isinstance(value, dict):
+            return value
+    except Exception:
+        pass
+    raise ValueError("Unable to parse structured JSON.")
+
+
+def _escape_summary_inner_quotes(text: str) -> str:
+    marker = "\"summary\":"
+    idx = text.find(marker)
+    if idx == -1:
+        return text
+    open_quote = text.find("\"", idx + len(marker))
+    if open_quote == -1:
+        return text
+    closing = None
+    i = open_quote + 1
+    while i < len(text):
+        if text[i] == "\"" and text[i - 1] != "\\":
+            closing = i
+            break
+        i += 1
+    if closing is None:
+        return text
+    inner = text[open_quote + 1:closing]
+    escaped_inner_chars = []
+    prev = ""
+    for ch in inner:
+        if ch == "\"" and prev != "\\":
+            escaped_inner_chars.append('\\"')
+        else:
+            escaped_inner_chars.append(ch)
+        prev = ch
+    escaped_inner = "".join(escaped_inner_chars)
+    return text[: open_quote + 1] + escaped_inner + text[closing:]
+
+
+def _sanitize_llm_text(text: str) -> str:
+    normalized = _normalize_llm_json_text(text)
+    replacements = {
+        "“": '"',
+        "”": '"',
+        "’": "'",
+        "‘": "'",
+        "，": ',',
+    }
+    for src, dst in replacements.items():
+        normalized = normalized.replace(src, dst)
+    normalized = _escape_summary_inner_quotes(normalized)
+    return normalized
+def _payload_from_llm(response_text: str, news_count: int, from_cache: bool, generated_on: str) -> Dict[str, Any]:
+    candidate_text = _sanitize_llm_text(response_text)
+    try:
+        parsed = _coerce_to_dict(candidate_text)
+    except ValueError as exc:
+        logger.error("Macro news LLM raw response: %s", response_text)
+        logger.error("Macro news LLM normalized candidate: %s", candidate_text)
+        raise ValueError(
+            f"Unable to parse macro news JSON: {exc}; "
+            f"normalized={candidate_text[:200]!r}"
+        ) from exc
+
+    summary_text = str(parsed.get("summary", "")).strip() or DEFAULT_SUMMARY_TEXT
+    payload = {
+        "index": parsed.get("index", MACRO_INDEX_NAME),
+        "signal": _sanitize_signal(parsed.get("signal")),
+        "confidence": _sanitize_confidence(parsed.get("confidence")),
+        "score": _sanitize_score(parsed.get("score")),
+        "summary": summary_text,
+        "key_drivers": _sanitize_list(parsed.get("key_drivers")),
+        "key_risks": _sanitize_list(parsed.get("key_risks")),
+        "actionable_insight": str(parsed.get("actionable_insight", "暂无")).strip() or "暂无",
+        "news_count": news_count,
+        "from_cache": from_cache,
+        "generated_on": generated_on,
+    }
+    return payload
+
+
+def _format_prompt_payload(news_items: List[Dict[str, str]]) -> str:
+    return json.dumps(news_items, ensure_ascii=False, indent=2)
 
 
 @agent_endpoint("macro_news_agent", "获取沪深300全量新闻并进行宏观分析，为投资决策提供市场层面的宏观环境评估")
 def macro_news_agent(state: AgentState) -> Dict[str, Any]:
-    """
-    获取沪深300全量新闻，调用LLM进行宏观分析，并保存结果。
-    该Agent独立运行，不依赖特定上游数据，结果注入AgentState。
-    """
     agent_name = "macro_news_agent"
     show_workflow_status(f"{agent_name}: --- Executing Macro News Agent ---")
-    symbol = "000300"  # 沪深300指数
-    news_list_for_llm: List[Dict[str, str]] = []
-    summary = f"宏观新闻分析过程中发生错误: 未知错误"  # Default error summary
-    retrieved_news_count = 0
-    from_cache = False  # Flag to indicate if summary was loaded from cache
 
+    symbol = "000300"
     today_str = datetime.now().strftime("%Y-%m-%d")
-    output_file_path = os.path.join("src", "data", "macro_summary.json")
+    output_file_path = MACRO_SUMMARY_PATH
 
-    # Attempt to load from cache first
-    invalid_cache_markers = [
-        "宏观新闻分析过程中发生错误",
-        "Exception during execution",
-        "SQLite objects created in a thread",
-    ]
     summary_failed = False
+    from_cache = False
+    retrieved_news_count = 0
+    analysis_payload: Optional[Dict[str, Any]] = None
+    all_summaries: Dict[str, Any] = {}
 
     if os.path.exists(output_file_path):
         try:
-            with open(output_file_path, 'r', encoding='utf-8') as f:
+            with open(output_file_path, "r", encoding="utf-8") as f:
                 all_summaries = json.load(f)
-            cached_data = all_summaries.get(today_str)
-            if cached_data and cached_data.get("summary_content"):
-                cached_summary = cached_data["summary_content"]
-                cached_status = cached_data.get("status", "ok")
-                looks_invalid = cached_status == "error" or any(
-                    marker in cached_summary for marker in invalid_cache_markers
-                )
-                if looks_invalid:
-                    show_workflow_status(
-                        f"{agent_name}: 从缓存加载 {today_str} 的宏观新闻总结被标记为异常，将重新获取。")
-                    from_cache = False
+            cached_entry = all_summaries.get(today_str)
+            if cached_entry and cached_entry.get("summary_content"):
+                cached_status = cached_entry.get("status", "ok")
+                cached_analysis = cached_entry.get("analysis")
+                invalid_cache = cached_status == "error" or not isinstance(cached_analysis, dict)
+                if invalid_cache:
+                    show_workflow_status(f"{agent_name}: 缓存中的 {today_str} 宏观摘要无效，尝试重新生成。")
                 else:
-                    summary = cached_summary
-                    retrieved_news_count = cached_data.get(
-                        "retrieved_news_count", 0)  # Get cached news count
+                    analysis_payload = {
+                        **cached_analysis,
+                        "news_count": cached_analysis.get("news_count", cached_entry.get("retrieved_news_count", 0)),
+                        "from_cache": True,
+                        "generated_on": cached_analysis.get("generated_on", today_str),
+                    }
+                    retrieved_news_count = analysis_payload.get("news_count", 0)
                     from_cache = True
-                    show_workflow_status(
-                        f"{agent_name}: 从缓存加载 {today_str} 的宏观新闻总结。")
+                    show_workflow_status(f"{agent_name}: 从缓存加载 {today_str} 的宏观新闻总结。")
                     show_agent_reasoning(
-                        f"Loaded macro summary for {today_str} from cache. News count: {retrieved_news_count}", agent_name)
+                        analysis_payload,
+                        "Macro News Agent (cached)",
+                    )
         except json.JSONDecodeError:
+            all_summaries = {}
             show_agent_reasoning(
-                f"JSONDecodeError for {output_file_path} when trying to load cache. Will fetch fresh data.", agent_name)
-            all_summaries = {}  # Reset if file is corrupt
-        except Exception as e:
+                {"error": "macro_summary.json decode error"},
+                "Macro News Agent Cache",
+            )
+        except Exception as exc:
+            all_summaries = {}
             show_agent_reasoning(
-                f"Error loading cache from {output_file_path}: {str(e)}. Will fetch fresh data.", agent_name)
-            all_summaries = {}  # Reset on other errors
+                {"error": f"Failed to load macro summary cache: {exc}"},
+                "Macro News Agent Cache",
+            )
+
+    news_items: List[Dict[str, str]] = []
 
     if not from_cache:
-        show_workflow_status(f"{agent_name}: 缓存中未找到今日总结或缓存无效，开始获取实时新闻。")
         try:
-            show_workflow_status(
-                f"{agent_name}: Fetching news for symbol {symbol}")
             news_df = get_stock_news(symbol)
             if news_df is None or news_df.empty:
-                message = f"未获取到 {symbol} 的新闻数据。"
-                show_workflow_status(f"{agent_name}: {message}")
-                show_agent_reasoning(
-                    f"No news found for {symbol}. Proceeding with no data summary.", agent_name)
-                summary = "今日未获取到相关宏观新闻数据。"
+                summary_failed = True
+                analysis_payload = _default_macro_payload("未获取到相关宏观新闻数据。", 0, False, today_str)
             else:
                 retrieved_news_count = len(news_df)
-                message = f"成功获取到 {symbol} 的 {retrieved_news_count} 条新闻数据。"
-                show_workflow_status(f"{agent_name}: {message}")
-                show_agent_reasoning(
-                    f"Successfully fetched {retrieved_news_count} news items for {symbol}. Preparing for LLM analysis.", agent_name)
-                for _, row in news_df.iterrows():
-                    news_item = {
-                        "title": str(row.get("新闻标题", "")).strip(),
-                        "content": str(row.get("新闻内容", "")).strip(),  # 全量内容
-                        "publish_time": str(row.get("发布时间", "")).strip()
-                    }
-                    news_list_for_llm.append(news_item)
-
-                news_data_json_string = json.dumps(
-                    news_list_for_llm, ensure_ascii=False, indent=2)
-                prompt_filled = LLM_PROMPT_MACRO_ANALYSIS.format(
-                    news_data_json_string=news_data_json_string)
-
                 show_workflow_status(
-                    f"{agent_name}: Calling LLM for analysis.")
-                llm_response = get_chat_completion(
-                    messages=[{"role": "user", "content": prompt_filled}]
-                )
-                summary = llm_response.strip() if llm_response else "LLM分析未能返回有效结果。"
-                show_workflow_status(f"{agent_name}: LLM宏观分析结果获取成功.")
-                show_agent_reasoning(
-                    f"LLM analysis complete. Summary (first 100 chars): {summary[:100]}...", agent_name)
-
-        except Exception as e:
-            error_message = f"{agent_name}: 执行出错: {e}"
-            show_workflow_status(error_message)
-            show_agent_reasoning(
-                f"Exception during execution: {str(e)}", agent_name)
+                    f"{agent_name}: 成功获取 {retrieved_news_count} 条新闻")
+                for _, row in news_df.iterrows():
+                    row_dict = row.to_dict()
+                    news_items.append({
+                        "title": str(row_dict.get("新闻标题") or row_dict.get("title") or "").strip(),
+                        "content": str(row_dict.get("新闻内容") or row_dict.get("content") or "").strip(),
+                        "publish_time": str(row_dict.get("发布时间") or row_dict.get("publish_time") or "").strip(),
+                    })
+                news_json = _format_prompt_payload(news_items)
+                prompt_text = LLM_PROMPT_MACRO_ANALYSIS.replace("<<NEWS_JSON>>", news_json)
+                llm_response = get_chat_completion([
+                    {"role": "user", "content": prompt_text}
+                ])
+                if not llm_response:
+                    raise ValueError("LLM returned empty response for macro news analysis.")
+                analysis_payload = _payload_from_llm(llm_response, retrieved_news_count, False, today_str)
+                show_agent_reasoning(analysis_payload, "Macro News Agent (LLM)")
+        except Exception as exc:
             summary_failed = True
-            summary = f"宏观新闻分析过程中发生错误: {str(e)}"
-    # 保存总结到JSON文件 (only if not from cache and successful, or if updating existing)
-    if not from_cache:  # Also save if summary was updated, even if initially from cache but e.g. re-analyzed
-        show_workflow_status(
-            f"{agent_name}: Preparing to save summary to {output_file_path}")
+            analysis_payload = _default_macro_payload(f"{ERROR_SUMMARY_TEXT}: {exc}", retrieved_news_count, False, today_str)
+            logger.exception("Macro news agent failed during LLM workflow.")
+            show_agent_reasoning({"error": str(exc)}, "Macro News Agent Error")
 
-        # Ensure all_summaries is initialized if cache loading failed or file didn't exist
-        if not os.path.exists(output_file_path) or 'all_summaries' not in locals():
-            all_summaries = {}
-            # if file exists but all_summaries wasn't set (e.g. decode error)
-            if os.path.exists(output_file_path):
-                try:
-                    with open(output_file_path, 'r', encoding='utf-8') as f:
-                        all_summaries = json.load(f)
-                except json.JSONDecodeError:
-                    all_summaries = {}  # If still error, start fresh
+    if analysis_payload is None:
+        analysis_payload = _default_macro_payload(DEFAULT_SUMMARY_TEXT, retrieved_news_count, from_cache, today_str)
+    else:
+        analysis_payload["from_cache"] = from_cache
+        analysis_payload["news_count"] = analysis_payload.get("news_count", retrieved_news_count)
+        analysis_payload.setdefault("generated_on", today_str)
 
-        os.makedirs(os.path.dirname(output_file_path),
-                    exist_ok=True)  # Ensure directory exists
+    summary_text = analysis_payload.get("summary", DEFAULT_SUMMARY_TEXT)
 
-        current_summary_details = {
-            "summary_content": summary,
-            "retrieved_news_count": retrieved_news_count,
+    if not from_cache:
+        entry = {
+            "summary_content": summary_text,
+            "analysis": analysis_payload,
+            "retrieved_news_count": analysis_payload.get("news_count", 0),
             "last_updated": datetime.now().isoformat(),
             "status": "error" if summary_failed else "ok",
         }
-        all_summaries[today_str] = current_summary_details
+        all_summaries[today_str] = entry
+        os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+        with open(output_file_path, 'w', encoding='utf-8') as f:
+            json.dump(all_summaries, f, ensure_ascii=False, indent=4)
+        show_workflow_status(f"{agent_name}: 已将宏观总结保存至 {output_file_path}")
 
-        try:
-            with open(output_file_path, 'w', encoding='utf-8') as f:
-                json.dump(all_summaries, f, ensure_ascii=False, indent=4)
-            show_workflow_status(
-                f"{agent_name}: 宏观新闻总结已保存到: {output_file_path}")
-        except Exception as e:
-            show_workflow_status(f"{agent_name}: 保存宏观新闻总结文件失败: {e}")
-            show_agent_reasoning(
-                f"Failed to save summary to {output_file_path}: {str(e)}", agent_name)
+    new_message = HumanMessage(
+        content=json.dumps(analysis_payload, ensure_ascii=False),
+        name=agent_name,
+    )
+
+    metadata_details = {
+        "summary_generated_on": today_str,
+        "news_count_for_summary": analysis_payload.get("news_count", 0),
+        "signal": analysis_payload.get("signal"),
+        "confidence": analysis_payload.get("confidence"),
+        "score": analysis_payload.get("score"),
+        "loaded_from_cache": from_cache,
+    }
+
+    updated_data = {
+        **state["data"],
+        "macro_news_analysis_result": analysis_payload,
+        "macro_news_summary_text": summary_text,
+    }
 
     show_workflow_status(f"{agent_name}: Execution finished.")
 
-    new_message_content = f"Macro News Agent Analysis for {today_str} (from_cache={from_cache}):\\n{summary}"
-    new_message = HumanMessage(content=new_message_content, name=agent_name)
-
-    agent_details_for_metadata = {
-        "summary_generated_on": today_str,
-        "news_count_for_summary": retrieved_news_count,
-        "llm_summary_preview": summary[:150] + "..." if len(summary) > 150 else summary,
-        "loaded_from_cache": from_cache
-    }
     return {
         "messages": list(state["messages"]) + [new_message],
-        "data": {**state["data"], "macro_news_analysis_result": summary},
+        "data": updated_data,
         "metadata": {
             **state["metadata"],
-            f"{agent_name}_details": agent_details_for_metadata
-        }
+            f"{agent_name}_details": metadata_details,
+        },
     }
