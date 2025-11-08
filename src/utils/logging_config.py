@@ -50,7 +50,7 @@ def _ensure_root_file_handler() -> None:
     root.setLevel(logging.DEBUG)
 
     combined_file = session_dir / "run.log"
-    handler = logging.FileHandler(combined_file, encoding="utf-8")
+    handler = logging.FileHandler(combined_file, encoding="utf-8", delay=True)
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(SESSION_FORMATTER)
     root.addHandler(handler)
@@ -76,7 +76,7 @@ def setup_logger(name: str, log_dir: Optional[str] = None) -> logging.Logger:
     target_dir.mkdir(parents=True, exist_ok=True)
     log_file = target_dir / f"{name}.log"
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler = logging.FileHandler(log_file, encoding="utf-8", delay=True)
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(SESSION_FORMATTER)
 
