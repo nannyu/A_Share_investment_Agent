@@ -6,6 +6,7 @@ import time
 import pandas as pd
 from urllib.parse import urlparse
 from src.tools.openrouter_config import get_chat_completion, logger as api_logger
+from src.tools.akshare_cache import get_stock_news
 
 # 导入新的搜索模块
 try:
@@ -14,16 +15,6 @@ except ImportError:
     print("警告: 无法导入新的搜索模块，将回退到 akshare")
     google_search_sync = None
     SearchOptions = None
-
-# 保留 akshare 作为备用
-try:
-    import akshare as ak
-    import requests
-    from bs4 import BeautifulSoup
-except ImportError:
-    print("警告: akshare 不可用")
-    ak = None
-
 
 def build_search_query(symbol: str, date: str = None) -> str:
     """
@@ -148,64 +139,39 @@ def convert_search_results_to_news_format(search_results, symbol: str) -> list:
 
 
 def get_stock_news_via_akshare(symbol: str, max_news: int = 10) -> list:
-    """使用 akshare 获取股票新闻的原始方法"""
-    if ak is None:
-        return []
-
+    """使用缓存增强的 AkShare 新闻接口"""
     try:
-        # 获取新闻列表
-        news_df = ak.stock_news_em(symbol=symbol)
-        if news_df is None or len(news_df) == 0:
+        news_df = get_stock_news(symbol)
+        if news_df is None or news_df.empty:
             print(f"未获取到{symbol}的新闻数据")
             return []
 
-        print(f"成功获取到{len(news_df)}条新闻")
-
-        # 实际可获取的新闻数量
         available_news_count = len(news_df)
         if available_news_count < max_news:
-            print(f"警告：实际可获取的新闻数量({available_news_count})少于请求的数量({max_news})")
+            print(f"提示: 实际可获取的新闻数量({available_news_count})少于目标({max_news})")
             max_news = available_news_count
 
-        # 获取指定条数的新闻（考虑到可能有些新闻内容为空，多获取50%）
         news_list = []
         for _, row in news_df.head(int(max_news * 1.5)).iterrows():
             try:
-                # 获取新闻内容
-                content = row["新闻内容"] if "新闻内容" in row and not pd.isna(
-                    row["新闻内容"]) else ""
-                if not content:
-                    content = row["新闻标题"]
-
-                # 只去除首尾空白字符
-                content = content.strip()
-                if len(content) < 10:  # 内容太短的跳过
+                content = str(row.get("新闻内容", "") or row.get("新闻标题", "")).strip()
+                if len(content) < 10:
                     continue
 
-                # 获取关键词
-                keyword = row["关键词"] if "关键词" in row and not pd.isna(
-                    row["关键词"]) else ""
-
-                # 添加新闻
                 news_item = {
-                    "title": row["新闻标题"].strip(),
+                    "title": str(row.get("新闻标题", "")).strip(),
                     "content": content,
-                    "publish_time": row["发布时间"],
-                    "source": row["文章来源"].strip(),
-                    "url": row["新闻链接"].strip(),
-                    "keyword": keyword.strip()
+                    "publish_time": str(row.get("发布时间", "")),
+                    "source": str(row.get("新闻来源", "")).strip(),
+                    "url": str(row.get("新闻链接", "")).strip(),
+                    "keyword": str(row.get("关键词", "")).strip()
                 }
                 news_list.append(news_item)
-                print(f"成功添加新闻: {news_item['title']}")
-
-            except Exception as e:
-                print(f"处理单条新闻时出错: {e}")
+            except Exception as err:
+                print(f"转换新闻记录时出错: {err}")
                 continue
 
-        # 按发布时间排序
         news_list.sort(key=lambda x: x["publish_time"], reverse=True)
-
-        # 只保留指定条数的有效新闻
         return news_list[:max_news]
 
     except Exception as e:

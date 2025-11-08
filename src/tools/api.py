@@ -1,42 +1,63 @@
 from typing import Dict, Any, List
 import pandas as pd
-import akshare as ak
 from datetime import datetime, timedelta
 import json
 import numpy as np
 from src.utils.logging_config import setup_logger
+from src.tools.akshare_cache import (
+    get_financial_indicators,
+    get_financial_report,
+    get_price_history_df,
+    get_stock_spot_row,
+)
 
 # 设置日志记录
 logger = setup_logger('api')
+
+REPORT_BALANCE_SHEET = "\u8d44\u4ea7\u8d1f\u503a\u8868"
+REPORT_INCOME_STATEMENT = "\u5229\u6da6\u8868"
+REPORT_CASH_FLOW = "\u73b0\u91d1\u6d41\u91cf\u8868"
+
+
+def _default_agent_metrics() -> Dict[str, float]:
+    return {
+        "return_on_equity": 0.0,
+        "net_margin": 0.0,
+        "operating_margin": 0.0,
+        "revenue_growth": 0.0,
+        "earnings_growth": 0.0,
+        "book_value_growth": 0.0,
+        "current_ratio": 0.0,
+        "debt_to_equity": 0.0,
+        "free_cash_flow_per_share": 0.0,
+        "earnings_per_share": 0.0,
+        "pe_ratio": 0.0,
+        "price_to_book": 0.0,
+        "price_to_sales": 0.0,
+    }
 
 
 def get_financial_metrics(symbol: str) -> Dict[str, Any]:
     """获取财务指标数据"""
     logger.info(f"Getting financial indicators for {symbol}...")
     try:
-        # 获取实时行情数据（用于市值和估值比率）
+        # ��ȡʵʱ�������ݣ�������ֵ�͹�ֵ���ʣ�
         logger.info("Fetching real-time quotes...")
-        realtime_data = ak.stock_zh_a_spot_em()
-        if realtime_data is None or realtime_data.empty:
-            logger.warning("No real-time quotes data available")
-            return [{}]
+        stock_data_series = get_stock_spot_row(symbol)
+        if stock_data_series is None or stock_data_series.empty:
+            logger.warning(f"No real-time quotes found for {symbol}, defaulting to zeros.")
+            stock_data = {}
+        else:
+            logger.info("? Real-time quotes fetched")
+            stock_data = stock_data_series.to_dict()
 
-        stock_data = realtime_data[realtime_data['代码'] == symbol]
-        if stock_data.empty:
-            logger.warning(f"No real-time quotes found for {symbol}")
-            return [{}]
-
-        stock_data = stock_data.iloc[0]
-        logger.info("✓ Real-time quotes fetched")
-
-        # 获取新浪财务指标
         logger.info("Fetching Sina financial indicators...")
         current_year = datetime.now().year
-        financial_data = ak.stock_financial_analysis_indicator(
+        financial_data = get_financial_indicators(
             symbol=symbol, start_year=str(current_year-1))
         if financial_data is None or financial_data.empty:
-            logger.warning("No financial indicator data available")
-            return [{}]
+            logger.warning("No financial indicator data available, using defaults.")
+            return [_default_agent_metrics()]
 
         # 按日期排序并获取最新的数据
         financial_data['日期'] = pd.to_datetime(financial_data['日期'])
@@ -50,8 +71,7 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
         # 获取利润表数据（用于计算 price_to_sales）
         logger.info("Fetching income statement...")
         try:
-            income_statement = ak.stock_financial_report_sina(
-                stock=f"sh{symbol}", symbol="利润表")
+            income_statement = get_financial_report(symbol, REPORT_INCOME_STATEMENT)
             if not income_statement.empty:
                 latest_income = income_statement.iloc[0]
                 logger.info("✓ Income statement fetched")
@@ -142,11 +162,11 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
 
         except Exception as e:
             logger.error(f"Error building indicators: {e}")
-            return [{}]
+            return [_default_agent_metrics()]
 
     except Exception as e:
         logger.error(f"Error getting financial indicators: {e}")
-        return [{}]
+        return [_default_agent_metrics()]
 
 
 def get_financial_statements(symbol: str) -> Dict[str, Any]:
@@ -156,8 +176,7 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         # 获取资产负债表数据
         logger.info("Fetching balance sheet...")
         try:
-            balance_sheet = ak.stock_financial_report_sina(
-                stock=f"sh{symbol}", symbol="资产负债表")
+            balance_sheet = get_financial_report(symbol, REPORT_BALANCE_SHEET)
             if not balance_sheet.empty:
                 latest_balance = balance_sheet.iloc[0]
                 previous_balance = balance_sheet.iloc[1] if len(
@@ -177,8 +196,7 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         # 获取利润表数据
         logger.info("Fetching income statement...")
         try:
-            income_statement = ak.stock_financial_report_sina(
-                stock=f"sh{symbol}", symbol="利润表")
+            income_statement = get_financial_report(symbol, REPORT_INCOME_STATEMENT)
             if not income_statement.empty:
                 latest_income = income_statement.iloc[0]
                 previous_income = income_statement.iloc[1] if len(
@@ -198,8 +216,7 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         # 获取现金流量表数据
         logger.info("Fetching cash flow statement...")
         try:
-            cash_flow = ak.stock_financial_report_sina(
-                stock=f"sh{symbol}", symbol="现金流量表")
+            cash_flow = get_financial_report(symbol, REPORT_CASH_FLOW)
             if not cash_flow.empty:
                 latest_cash_flow = cash_flow.iloc[0]
                 previous_cash_flow = cash_flow.iloc[1] if len(
@@ -282,17 +299,17 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
 def get_market_data(symbol: str) -> Dict[str, Any]:
     """获取市场数据"""
     try:
-        # 获取实时行情
-        realtime_data = ak.stock_zh_a_spot_em()
-        stock_data = realtime_data[realtime_data['代码'] == symbol].iloc[0]
+        stock_data = get_stock_spot_row(symbol)
+        if stock_data is None or stock_data.empty:
+            return {}
 
         return {
             "market_cap": float(stock_data.get("总市值", 0)),
             "volume": float(stock_data.get("成交量", 0)),
-            # A股没有平均成交量，暂用当日成交量
+            # A股没有平均成交量，选用日成交量
             "average_volume": float(stock_data.get("成交量", 0)),
             "fifty_two_week_high": float(stock_data.get("52周最高", 0)),
-            "fifty_two_week_low": float(stock_data.get("52周最低", 0))
+            "fifty_two_week_low": float(stock_data.get("52周最低", 0)),
         }
 
     except Exception as e:
@@ -364,18 +381,16 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
 
         def get_and_process_data(start_date, end_date):
             """获取并处理数据，包括重命名列等操作"""
-            df = ak.stock_zh_a_hist(
+            df = get_price_history_df(
                 symbol=symbol,
-                period="daily",
-                start_date=start_date.strftime("%Y%m%d"),
-                end_date=end_date.strftime("%Y%m%d"),
-                adjust=adjust
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
             )
 
             if df is None or df.empty:
                 return pd.DataFrame()
 
-            # 重命名列以匹配技术分析代理的需求
             df = df.rename(columns={
                 "日期": "date",
                 "开盘": "open",
@@ -387,10 +402,9 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
                 "振幅": "amplitude",
                 "涨跌幅": "pct_change",
                 "涨跌额": "change_amount",
-                "换手率": "turnover"
+                "换手率": "turnover",
             })
 
-            # 确保日期列为datetime类型
             df["date"] = pd.to_datetime(df["date"])
             return df
 

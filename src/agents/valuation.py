@@ -17,7 +17,7 @@ def valuation_agent(state: AgentState):
     metrics = data["financial_metrics"][0]
     current_financial_line_item = data["financial_line_items"][0]
     previous_financial_line_item = data["financial_line_items"][1]
-    market_cap = data["market_cap"]
+    market_cap_value = data.get("market_cap") or 0
 
     reasoning = {}
 
@@ -47,9 +47,12 @@ def valuation_agent(state: AgentState):
     )
 
     # Calculate combined valuation gap (average of both methods)
-    dcf_gap = (dcf_value - market_cap) / market_cap
-    owner_earnings_gap = (owner_earnings_value - market_cap) / market_cap
-    valuation_gap = (dcf_gap + owner_earnings_gap) / 2
+    if market_cap_value > 0:
+        dcf_gap = (dcf_value - market_cap_value) / market_cap_value
+        owner_earnings_gap = (owner_earnings_value - market_cap_value) / market_cap_value
+        valuation_gap = (dcf_gap + owner_earnings_gap) / 2
+    else:
+        dcf_gap = owner_earnings_gap = valuation_gap = 0
 
     if valuation_gap > 0.10:  # Changed from 0.15 to 0.10 (10% undervalued)
         signal = 'bullish'
@@ -60,12 +63,12 @@ def valuation_agent(state: AgentState):
 
     reasoning["dcf_analysis"] = {
         "signal": "bullish" if dcf_gap > 0.10 else "bearish" if dcf_gap < -0.20 else "neutral",
-        "details": f"Intrinsic Value: ${dcf_value:,.2f}, Market Cap: ${market_cap:,.2f}, Gap: {dcf_gap:.1%}"
+        "details": f"Intrinsic Value: ${dcf_value:,.2f}, Market Cap: {'N/A' if market_cap_value <= 0 else f'${market_cap_value:,.2f}'}, Gap: {dcf_gap:.1%}"
     }
 
     reasoning["owner_earnings_analysis"] = {
         "signal": "bullish" if owner_earnings_gap > 0.10 else "bearish" if owner_earnings_gap < -0.20 else "neutral",
-        "details": f"Owner Earnings Value: ${owner_earnings_value:,.2f}, Market Cap: ${market_cap:,.2f}, Gap: {owner_earnings_gap:.1%}"
+        "details": f"Owner Earnings Value: ${owner_earnings_value:,.2f}, Market Cap: {'N/A' if market_cap_value <= 0 else f'${market_cap_value:,.2f}'}, Gap: {owner_earnings_gap:.1%}"
     }
 
     message_content = {

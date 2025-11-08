@@ -1,7 +1,6 @@
 import os
 import json
 from datetime import datetime
-import akshare as ak
 from src.utils.logging_config import setup_logger
 # from langgraph.graph import AgentState # Changed import
 # Added for alignment
@@ -9,6 +8,7 @@ from src.agents.state import AgentState, show_agent_reasoning, show_workflow_sta
 from typing import Dict, Any, List
 from src.utils.api_utils import agent_endpoint  # Added for alignment
 from src.tools.openrouter_config import get_chat_completion
+from src.tools.akshare_cache import get_stock_news
 from langchain_core.messages import HumanMessage  # Added import
 
 # LLM Prompt for analyzing full news data
@@ -77,7 +77,7 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
         try:
             show_workflow_status(
                 f"{agent_name}: Fetching news for symbol {symbol}")
-            news_df = ak.stock_news_em(symbol=symbol)
+            news_df = get_stock_news(symbol)
             if news_df is None or news_df.empty:
                 message = f"未获取到 {symbol} 的新闻数据。"
                 show_workflow_status(f"{agent_name}: {message}")

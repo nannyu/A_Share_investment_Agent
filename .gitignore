@@ -20,7 +20,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+AGENTS.md
 # Virtual Environment
 venv/
 ENV/
@@ -55,8 +55,12 @@ ENV/
 reference/ 
 
 # Documentation
-docs/ 
+docs/*
+!docs/database.md
 structure.drawio
+
+# Generated cache/database
+data/
 
 # logs
 logs/
@@ -64,9 +68,6 @@ logs/
 # data
 src/data/stock_news
 src/data/sentiment_cache.json
-
-# docs
-docs/
 
 # cache
 cache/
@@ -82,3 +83,8 @@ test/
 test*
 src/crawler/*.ts
 *.json
+reports/
+
+#test
+integration/ 
+

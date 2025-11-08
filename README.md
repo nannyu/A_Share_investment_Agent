@@ -1,4 +1,4 @@
-<div align="center">
+
 
 # 🤖 AI 投资系统 🧠
 
@@ -63,6 +63,13 @@
 另外，优化了终端输出，减少了不必要的详细数据显示，使输出更加清晰易读。
 
 ## 最新功能：
+### 2025.11.08 数据缓存层
+
+- 新增 `data/akshare_cache.db` SQLite 缓存，持久化 AkShare 输出的实时行情 / 财务指标 / 三大报表 / 日线行情 / 新闻数据；所有表的列名与 AkShare 保持一致，并额外记录 `缓存时间`。
+- `src/tools/akshare_cache.py` 提供统一的 TTL 策略、自动建表/补列/去重逻辑，并在请求伊始优先命中缓存。
+- 默认 TTL：实时行情 10 分钟、财务指标 24 小时、财务报表 7 天、新闻 2 小时，历史日线数据长期保存；可在调用处覆盖。
+- 相比直接命中 AkShare API，新缓存层显著降低 RemoteDisconnected / ProxyError 等异常，避免新闻抓取反复触发回退逻辑。
+
 
 ### 2025.06.22 新闻搜索功能升级
 
@@ -152,14 +159,34 @@ cp .env.example .env
 打开项目根目录下的 `.env` 文件, 填入您的 API key:
 
 ```env
-# Gemini API 配置
+# Gemini API ����
 GEMINI_API_KEY=your-gemini-api-key
 GEMINI_MODEL=gemini-1.5-flash
 
-# OpenAI Compatible API 配置（可选）
+# OpenAI Compatible API ���ã���ѡ��
 OPENAI_COMPATIBLE_API_KEY=your-openai-compatible-api-key
 OPENAI_COMPATIBLE_BASE_URL=https://your-api-endpoint.com/v1
 OPENAI_COMPATIBLE_MODEL=your-model-name
+
+# AkShare �����������ã���ѡ��
+# AKSHARE_PROXY_LIST ֧��用逗号或分号分隔，加 "direct" 表示尝试直连。
+# ��例：AKSHARE_PROXY_LIST=http://user:pass@proxy1:8080,http://user:pass@proxy2:8080,direct
+AKSHARE_PROXY_LIST=direct
+AKSHARE_PROXY_MAX_ATTEMPTS=3
+AKSHARE_PROXY_BASE_DELAY=1
+AKSHARE_PROXY_MAX_DELAY=15
+AKSHARE_PROXY_JITTER=0.5
+AKSHARE_PROXY_ALLOW_DIRECT=true
+```
+
+# AkShare �����������ã���ѡ��
+# ��ʾ�� AKSHARE_PROXY_LIST=http://user:pass@proxy1:8080,http://user:pass@proxy2:8080,direct
+AKSHARE_PROXY_LIST=
+AKSHARE_PROXY_MAX_ATTEMPTS=3
+AKSHARE_PROXY_BASE_DELAY=1
+AKSHARE_PROXY_MAX_DELAY=15
+AKSHARE_PROXY_JITTER=0.5
+AKSHARE_PROXY_ALLOW_DIRECT=true
 ```
 
 **注意:** 系统会优先使用 OpenAI Compatible API（如果配置了），否则会使用 Gemini API。
@@ -462,6 +489,8 @@ A_Share_investment_Agent/
 </div>
 
 ## 🤝 贡献指南 (Contributing)
+- 运行 `poetry run pytest` 可执行完整测试；其中 `src/tools/test_gemini.py` 依赖外部 LLM API，默认通过 `RUN_GEMINI_TESTS=1` 显式开启，避免在 CI/离线环境发起真实请求。
+
 
 我们欢迎各种形式的贡献！
 
