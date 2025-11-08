@@ -34,15 +34,23 @@ class ProxyManager:
 
     @classmethod
     def from_env(cls, logger=None) -> "ProxyManager":
-        raw = os.getenv("AKSHARE_PROXY_LIST", "").replace(";", ",")
-        proxies = [item.strip() for item in raw.split(",") if item.strip()]
-        allow_direct = os.getenv("AKSHARE_PROXY_ALLOW_DIRECT", "true").lower() in (
+        force_direct = os.getenv("AKSHARE_PROXY_FORCE_DIRECT", "false").lower() in (
             "1",
             "true",
             "yes",
         )
-        if allow_direct and "direct" not in [p.lower() for p in proxies]:
-            proxies.insert(0, "direct")
+        if force_direct:
+            proxies = ["direct"]
+        else:
+            raw = os.getenv("AKSHARE_PROXY_LIST", "").replace(";", ",")
+            proxies = [item.strip() for item in raw.split(",") if item.strip()]
+            allow_direct = os.getenv("AKSHARE_PROXY_ALLOW_DIRECT", "true").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            if allow_direct and "direct" not in [p.lower() for p in proxies]:
+                proxies.insert(0, "direct")
 
         max_attempts = int(os.getenv("AKSHARE_PROXY_MAX_ATTEMPTS", "3"))
         base_delay = float(os.getenv("AKSHARE_PROXY_BASE_DELAY", "1"))
@@ -68,14 +76,19 @@ class ProxyManager:
 
     @contextmanager
     def _apply_proxy(self, proxy: Optional[str]):
-        previous = {key: os.environ.get(key) for key in ("HTTP_PROXY", "HTTPS_PROXY")}
+        previous = {
+            key: os.environ.get(key)
+            for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+        }
         try:
             if proxy and proxy.lower() != "direct":
                 os.environ["HTTP_PROXY"] = proxy
                 os.environ["HTTPS_PROXY"] = proxy
+                os.environ.pop("NO_PROXY", None)
             else:
                 for key in ("HTTP_PROXY", "HTTPS_PROXY"):
                     os.environ.pop(key, None)
+                os.environ["NO_PROXY"] = "*"
             yield proxy
         finally:
             for key, value in previous.items():

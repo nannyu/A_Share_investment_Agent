@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -23,12 +24,24 @@ COL_KEYWORD = "\u5173\u952e\u8bcd"
 COL_PUBLISH_TIME = "\u53d1\u5e03\u65f6\u95f4"
 COL_HEADLINE = "\u65b0\u95fb\u6807\u9898"
 COL_ADJUST_TYPE = "\u590d\u6743\u7c7b\u578b"
+COL_TRADE_DATE = "trade_date"
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 CACHE_PATH = BASE_DIR / "data" / "akshare_cache.db"
 
+TRADING_CALENDAR_TABLE = "tool_trade_date_hist_sina"
+
 logger = setup_logger("akshare_cache")
 cache = AkshareSQLiteCache(CACHE_PATH)
+
+
+def _log_cache_hit(label: str, symbol: str, rows: int) -> None:
+    logger.info("[cache] %s 命中，标的=%s，行数=%d", label, symbol, rows)
+
+
+def _log_cache_upsert(label: str, symbol: str, rows: int, extra: str = "") -> None:
+    suffix = f"，{extra}" if extra else ""
+    logger.info("[cache] %s 写入完成，标的=%s，新增/更新行数=%d%s", label, symbol, rows, suffix)
 
 
 def _call_with_retry(func, label: str):
@@ -50,6 +63,78 @@ def _records_to_df(records: List[Dict]) -> pd.DataFrame:
     return _drop_cache_columns(df)
 
 
+def _normalize_calendar_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or COL_TRADE_DATE not in df.columns:
+        return pd.DataFrame()
+    normalized = df[[COL_TRADE_DATE]].copy()
+    normalized[COL_TRADE_DATE] = pd.to_datetime(normalized[COL_TRADE_DATE]).dt.normalize()
+    return normalized
+
+
+def _refresh_trading_calendar() -> pd.DataFrame:
+    fetched = _call_with_retry(ak.tool_trade_date_hist_sina, TRADING_CALENDAR_TABLE)
+    if fetched is None or fetched.empty:
+        return pd.DataFrame()
+    cache.delete_records(TRADING_CALENDAR_TABLE)
+    cache.upsert_records(
+        TRADING_CALENDAR_TABLE,
+        fetched.to_dict("records"),
+        key_columns=[COL_TRADE_DATE],
+    )
+    return _normalize_calendar_df(fetched)
+
+
+@lru_cache(maxsize=1)
+def _load_trading_calendar_cached() -> pd.DataFrame:
+    cached = cache.fetch_records(table=TRADING_CALENDAR_TABLE)
+    df = _normalize_calendar_df(_records_to_df(cached))
+    if df.empty:
+        return _refresh_trading_calendar()
+    return df
+
+
+def _load_trading_calendar(force_refresh: bool = False) -> pd.DataFrame:
+    if force_refresh:
+        _load_trading_calendar_cached.cache_clear()
+        refreshed = _refresh_trading_calendar()
+        if refreshed.empty:
+            return refreshed
+    return _load_trading_calendar_cached()
+
+
+def _trading_days_between(start_date: datetime, end_date: datetime) -> List[pd.Timestamp]:
+    normalized_start = pd.Timestamp(start_date).normalize()
+    normalized_end = pd.Timestamp(end_date).normalize()
+    calendar = _load_trading_calendar()
+
+    if not calendar.empty:
+        min_day = calendar[COL_TRADE_DATE].min()
+        max_day = calendar[COL_TRADE_DATE].max()
+        if normalized_start < min_day or normalized_end > max_day:
+            calendar = _load_trading_calendar(force_refresh=True)
+
+    if calendar.empty:
+        logger.warning(
+            "Trading calendar unavailable; falling back to business-day range (weekends skipped)."
+        )
+        return list(pd.bdate_range(normalized_start, normalized_end))
+
+    mask = (calendar[COL_TRADE_DATE] >= normalized_start) & (
+        calendar[COL_TRADE_DATE] <= normalized_end
+    )
+    return list(calendar.loc[mask, COL_TRADE_DATE])
+
+
+def _resolve_exchange_symbol(symbol: str) -> str:
+    cleaned = symbol.strip()
+    lowered = cleaned.lower()
+    if lowered.startswith(("sh", "sz")):
+        return lowered
+    if cleaned.startswith(("6", "9")):
+        return f"sh{cleaned}"
+    return f"sz{cleaned}"
+
+
 def get_stock_spot_row(symbol: str, ttl_seconds: int = 600) -> Optional[pd.Series]:
     cached = cache.fetch_records(
         table="stock_zh_a_spot_em",
@@ -59,6 +144,7 @@ def get_stock_spot_row(symbol: str, ttl_seconds: int = 600) -> Optional[pd.Serie
         limit=1,
     )
     if cached:
+        _log_cache_hit("stock_zh_a_spot_em", symbol, len(cached))
         row = cached[0].copy()
         row.pop("缓存时间", None)
         return pd.Series(row)
@@ -79,6 +165,7 @@ def get_stock_spot_row(symbol: str, ttl_seconds: int = 600) -> Optional[pd.Serie
         filtered.to_dict("records"),
         key_columns=[COL_CODE],
     )
+    _log_cache_upsert("stock_zh_a_spot_em", symbol, len(filtered))
     return filtered.iloc[0]
 
 
@@ -92,6 +179,7 @@ def get_financial_indicators(
         order_by=f'"{COL_DATE}" DESC',
     )
     if cached:
+        _log_cache_hit("stock_financial_analysis_indicator", symbol, len(cached))
         return _records_to_df(cached)
 
     df = _call_with_retry(
@@ -110,6 +198,7 @@ def get_financial_indicators(
         df.to_dict("records"),
         key_columns=[COL_CODE, COL_DATE],
     )
+    _log_cache_upsert("stock_financial_analysis_indicator", symbol, len(df))
     return df
 
 
@@ -122,10 +211,12 @@ def get_financial_report(
         ttl_seconds=ttl_seconds,
     )
     if cached:
+        _log_cache_hit(f"stock_financial_report_sina[{report_type}]", symbol, len(cached))
         return _records_to_df(cached)
 
+    exchange_symbol = _resolve_exchange_symbol(symbol)
     df = _call_with_retry(
-        lambda: ak.stock_financial_report_sina(stock=f"sh{symbol}", symbol=report_type),
+        lambda: ak.stock_financial_report_sina(stock=exchange_symbol, symbol=report_type),
         "stock_financial_report_sina",
     )
     if df is None:
@@ -142,6 +233,9 @@ def get_financial_report(
         "stock_financial_report_sina",
         df.to_dict("records"),
         key_columns=[COL_CODE, COL_REPORT_TYPE, COL_REPORT_DATE],
+    )
+    _log_cache_upsert(
+        f"stock_financial_report_sina[{report_type}]", symbol, len(df)
     )
     return df
 
@@ -167,7 +261,7 @@ def get_price_history_df(
         if data is None or data.empty:
             return pd.DataFrame()
         data = data.copy()
-        data[COL_DATE] = pd.to_datetime(data["����"]).dt.strftime("%Y-%m-%d")
+        data[COL_DATE] = pd.to_datetime(data["日期"]).dt.strftime("%Y-%m-%d")
         data[COL_CODE] = symbol
         data[COL_ADJUST_TYPE] = adjust
         cache.upsert_records(
@@ -194,20 +288,16 @@ def get_price_history_df(
             cached_dates = list(df_cached[COL_DATE].dt.normalize())
             cached_frames.append(df_cached)
 
-    def _normalize(ts: datetime) -> pd.Timestamp:
-        return pd.Timestamp(ts).normalize()
-
     def _missing_segments(
-        req_start: datetime, req_end: datetime, existing: Sequence[pd.Timestamp]
+        required_days: Sequence[pd.Timestamp], existing: Sequence[pd.Timestamp]
     ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-        if req_start > req_end:
+        if not required_days:
             return []
-        required = pd.date_range(_normalize(req_start), _normalize(req_end), freq="D")
         existing_set = set(existing)
         segments: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
         current_start: Optional[pd.Timestamp] = None
         prev_day: Optional[pd.Timestamp] = None
-        for day in required:
+        for day in required_days:
             if day in existing_set:
                 if current_start is not None:
                     segments.append((current_start, prev_day))
@@ -220,7 +310,8 @@ def get_price_history_df(
             segments.append((current_start, prev_day))
         return segments
 
-    missing_segments = _missing_segments(start_date, end_date, cached_dates)
+    required_days = _trading_days_between(start_date, end_date)
+    missing_segments = _missing_segments(required_days, cached_dates)
     for seg_start, seg_end in missing_segments:
         fetched = _fetch_segment(seg_start, seg_end)
         if not fetched.empty:
@@ -247,6 +338,7 @@ def get_stock_news(symbol: str, ttl_seconds: int = 2 * 3600) -> pd.DataFrame:
         order_by=f'"{COL_PUBLISH_TIME}" DESC',
     )
     if cached:
+        _log_cache_hit("stock_news_em", symbol, len(cached))
         return _records_to_df(cached)
 
     df = _call_with_retry(lambda: ak.stock_news_em(symbol=symbol), "stock_news_em")
@@ -262,4 +354,5 @@ def get_stock_news(symbol: str, ttl_seconds: int = 2 * 3600) -> pd.DataFrame:
         df.to_dict("records"),
         key_columns=[COL_KEYWORD, COL_PUBLISH_TIME, COL_HEADLINE],
     )
+    _log_cache_upsert("stock_news_em", symbol, len(df))
     return df

@@ -1,60 +1,91 @@
-import os
-import time
 import logging
+import os
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 
+SESSION_FORMATTER = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+SESSION_DIR: Optional[Path] = None
+ROOT_FILE_HANDLER: Optional[logging.Handler] = None
+
+
+def _logs_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "logs"
+
+
+def _sanitize(label: str) -> str:
+    return "".join(ch for ch in label if ch.isalnum() or ch in "-_")
+
+
+def _init_session_dir() -> Path:
+    global SESSION_DIR
+    if SESSION_DIR is not None:
+        return SESSION_DIR
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_hint = os.getenv("RUN_LOG_LABEL")
+    folder_name = _sanitize(run_hint) if run_hint else f"run_{timestamp}_{os.getpid()}"
+
+    base = _logs_root()
+    session_dir = base / folder_name
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    SESSION_DIR = session_dir
+    os.environ["RUN_LOG_DIR"] = str(session_dir)
+    return session_dir
+
+
+def _ensure_root_file_handler() -> None:
+    global ROOT_FILE_HANDLER
+    if ROOT_FILE_HANDLER is not None:
+        return
+
+    session_dir = _init_session_dir()
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    combined_file = session_dir / "run.log"
+    handler = logging.FileHandler(combined_file, encoding="utf-8")
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(SESSION_FORMATTER)
+    root.addHandler(handler)
+    ROOT_FILE_HANDLER = handler
+
+
 def setup_logger(name: str, log_dir: Optional[str] = None) -> logging.Logger:
-    """设置统一的日志配置
+    """Configure and return a logger stored under the current run directory."""
+    _ensure_root_file_handler()
 
-    Args:
-        name: logger的名称
-        log_dir: 日志文件目录，如果为None则使用默认的logs目录
-
-    Returns:
-        配置好的logger实例
-    """
-    # 设置 root logger 的级别为 DEBUG
-    logging.getLogger().setLevel(logging.DEBUG)
-
-    # 获取或创建 logger
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)  # logger本身记录DEBUG级别及以上
-    logger.propagate = False  # 防止日志消息传播到父级logger
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
 
-    # 如果已经有处理器，不再添加
     if logger.handlers:
         return logger
 
-    # 创建控制台处理器
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)  # 控制台只显示INFO及以上级别
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(SESSION_FORMATTER)
 
-    # 创建格式化器
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    console_handler.setFormatter(formatter)
+    target_dir = Path(log_dir) if log_dir else _init_session_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    log_file = target_dir / f"{name}.log"
 
-    # 创建文件处理器
-    if log_dir is None:
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))), 'logs')
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f"{name}.log")
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)  # 文件记录DEBUG级别及以上的日志
-    file_handler.setFormatter(formatter)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(SESSION_FORMATTER)
 
-    # 添加处理器到日志记录器
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
-
     return logger
 
 
-# 预定义的图标
-SUCCESS_ICON = "✓"
-ERROR_ICON = "✗"
-WAIT_ICON = "🔄"
+# Symbols for structured terminal output
+SUCCESS_ICON = "[OK]"
+ERROR_ICON = "[X]"
+WAIT_ICON = "[..]"

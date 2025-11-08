@@ -8,10 +8,12 @@ if AkShare adds more fields in the future.
 
 from __future__ import annotations
 
+import atexit
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+import threading
 
 import numpy as np
 import pandas as pd
@@ -51,16 +53,33 @@ class AkshareSQLiteCache:
 
     def __init__(self, database_path: Path) -> None:
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(database_path)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL;")
-        self._conn.execute("PRAGMA synchronous=NORMAL;")
+        self._database_path = database_path
+        self._local = threading.local()
+        self._closed = False
+        self._atexit_registered = False
+        self._register_atexit()
+
+    def _register_atexit(self) -> None:
+        if not self._atexit_registered:
+            atexit.register(self.close)
+            self._atexit_registered = True
+
+    def _get_conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self._database_path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            self._local.conn = conn
+        return conn
 
     # ------------------------------------------------------------------
     # Schema helpers
     # ------------------------------------------------------------------
     def _table_columns(self, table: str) -> Dict[str, str]:
-        cursor = self._conn.execute(f'PRAGMA table_info("{table}");')
+        conn = self._get_conn()
+        cursor = conn.execute(f'PRAGMA table_info("{table}");')
         return {row[1]: row[2] for row in cursor.fetchall()}
 
     def _ensure_table(
@@ -86,18 +105,20 @@ class AkshareSQLiteCache:
                 + pk_clause
                 + ");"
             )
-            self._conn.execute(create_sql)
-            self._conn.commit()
+            conn = self._get_conn()
+            conn.execute(create_sql)
+            conn.commit()
             return
 
         # Add missing columns on-the-fly.
         for column, value in sample_record.items():
             if column not in columns:
                 sql_type = _infer_sql_type(value)
-                self._conn.execute(
+                conn = self._get_conn()
+                conn.execute(
                     f'ALTER TABLE "{table}" ADD COLUMN "{column}" {sql_type};'
                 )
-        self._conn.commit()
+        self._get_conn().commit()
 
     # ------------------------------------------------------------------
     # Public API
@@ -142,8 +163,9 @@ class AkshareSQLiteCache:
             sql += f" ON CONFLICT {conflict_clause} DO UPDATE SET {update_clause}"
 
         rows = [[record[col] for col in columns] for record in payload]
-        self._conn.executemany(sql, rows)
-        self._conn.commit()
+        conn = self._get_conn()
+        conn.executemany(sql, rows)
+        conn.commit()
 
     def fetch_records(
         self,
@@ -177,7 +199,8 @@ class AkshareSQLiteCache:
         if limit is not None:
             sql += f" LIMIT {limit}"
 
-        cursor = self._conn.execute(sql, params)
+        conn = self._get_conn()
+        cursor = conn.execute(sql, params)
         return [dict(row) for row in cursor.fetchall()]
 
     def delete_records(
@@ -196,8 +219,17 @@ class AkshareSQLiteCache:
         sql = f'DELETE FROM "{table}"'
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        self._conn.execute(sql, params)
-        self._conn.commit()
+        conn = self._get_conn()
+        conn.execute(sql, params)
+        conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
+        self._closed = True
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
+
+    def __del__(self) -> None:
+        if not self._closed:
+            self.close()

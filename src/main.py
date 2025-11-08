@@ -166,8 +166,9 @@ workflow.add_edge("risk_management_agent", "macro_analyst_agent")
 # macro_analyst_agent (end of main analysis path) and macro_news_agent (parallel news path)
 # both feed into portfolio_management_agent.
 # LangGraph will wait for both parent nodes to complete before running portfolio_management_agent.
+# Macro analyst should wait for both risk manager result and macro news summary
+workflow.add_edge("macro_news_agent", "macro_analyst_agent")
 workflow.add_edge("macro_analyst_agent", "portfolio_management_agent")
-workflow.add_edge("macro_news_agent", "portfolio_management_agent")
 
 # Final node
 workflow.add_edge("portfolio_management_agent", END)
