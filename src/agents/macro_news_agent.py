@@ -49,20 +49,37 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
     output_file_path = os.path.join("src", "data", "macro_summary.json")
 
     # Attempt to load from cache first
+    invalid_cache_markers = [
+        "宏观新闻分析过程中发生错误",
+        "Exception during execution",
+        "SQLite objects created in a thread",
+    ]
+    summary_failed = False
+
     if os.path.exists(output_file_path):
         try:
             with open(output_file_path, 'r', encoding='utf-8') as f:
                 all_summaries = json.load(f)
-            if today_str in all_summaries and all_summaries[today_str].get("summary_content"):
-                cached_data = all_summaries[today_str]
-                summary = cached_data["summary_content"]
-                retrieved_news_count = cached_data.get(
-                    "retrieved_news_count", 0)  # Get cached news count
-                from_cache = True
-                show_workflow_status(
-                    f"{agent_name}: 从缓存加载 {today_str} 的宏观新闻总结。")
-                show_agent_reasoning(
-                    f"Loaded macro summary for {today_str} from cache. News count: {retrieved_news_count}", agent_name)
+            cached_data = all_summaries.get(today_str)
+            if cached_data and cached_data.get("summary_content"):
+                cached_summary = cached_data["summary_content"]
+                cached_status = cached_data.get("status", "ok")
+                looks_invalid = cached_status == "error" or any(
+                    marker in cached_summary for marker in invalid_cache_markers
+                )
+                if looks_invalid:
+                    show_workflow_status(
+                        f"{agent_name}: �ӻ������ {today_str} �ĺ�������ܽᱻ��־Ϊ�쳣�����·�������.")
+                    from_cache = False
+                else:
+                    summary = cached_summary
+                    retrieved_news_count = cached_data.get(
+                        "retrieved_news_count", 0)  # Get cached news count
+                    from_cache = True
+                    show_workflow_status(
+                        f"{agent_name}: �ӻ������ {today_str} �ĺ�������ܽᡣ")
+                    show_agent_reasoning(
+                        f"Loaded macro summary for {today_str} from cache. News count: {retrieved_news_count}", agent_name)
         except json.JSONDecodeError:
             show_agent_reasoning(
                 f"JSONDecodeError for {output_file_path} when trying to load cache. Will fetch fresh data.", agent_name)
@@ -114,12 +131,12 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
                     f"LLM analysis complete. Summary (first 100 chars): {summary[:100]}...", agent_name)
 
         except Exception as e:
-            error_message = f"{agent_name}: 执行出错: {e}"
+            error_message = f"{agent_name}: ִ�г���: {e}"
             show_workflow_status(error_message)
             show_agent_reasoning(
                 f"Exception during execution: {str(e)}", agent_name)
-            summary = f"宏观新闻分析过程中发生错误: {str(e)}"
-
+            summary_failed = True
+            summary = f"������ŷ��������з�������: {str(e)}"
     # 保存总结到JSON文件 (only if not from cache and successful, or if updating existing)
     if not from_cache:  # Also save if summary was updated, even if initially from cache but e.g. re-analyzed
         show_workflow_status(
@@ -142,7 +159,8 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
         current_summary_details = {
             "summary_content": summary,
             "retrieved_news_count": retrieved_news_count,
-            "last_updated": datetime.now().isoformat()
+            "last_updated": datetime.now().isoformat(),
+            "status": "error" if summary_failed else "ok",
         }
         all_summaries[today_str] = current_summary_details
 
