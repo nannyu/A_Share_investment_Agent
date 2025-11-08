@@ -504,7 +504,7 @@ A_Share_investment_Agent/
 <img src="[https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png](https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png)" width="100%">
 </div>
 
-## ☕️ 支持与社区
+## ☕️ 支持
 
 如果这个项目对你有帮助，欢迎请我喝杯咖啡 ❤️
 
@@ -512,24 +512,6 @@ A_Share_investment_Agent/
   <img src="src/data/img/ali.png" alt="支付宝收款码" width="250"/>
 </div>
 
-### 🌟 加入我们的社区
-
-同时也欢迎关注我们的公众号【空指针指向量化 Agent】（原文为：空指针指向了量化 Agent，根据上下文推测可能笔误），获取更多量化投资和 AI 智能交易相关的干货内容！
-
-<div style="display: flex; justify-content: space-around; align-items: flex-start; flex-wrap: wrap;">
-    <div style="text-align: center; margin: 10px;">
-        <p><b>公众号：空指针指向量化 Agent</b></p>
-        <img src="src/data/img/gzh_code.jpg" alt="公众号二维码" width="250"/>
-    </div>
-    <div style="text-align: center; margin: 10px;">
-        <p><b>知识星球</b><br/>独家策略、资料分享<br/>量化投资交流、一对一答疑</p>
-        <img src="src/data/img/planet.jpg" alt="知识星球二维码" width="250"/>
-    </div>
-</div>
-
-<div align="center">
-<img src="[https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png](https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png)" width="100%">
-</div>
 
 ## 📖 项目详细说明
 
