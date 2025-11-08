@@ -8,8 +8,8 @@ from src.tools.akshare_cache import (
     get_financial_indicators,
     get_financial_report,
     get_price_history_df,
-    get_stock_spot_row,
 )
+from src.tools.market_snapshot import get_market_snapshot
 
 # 设置日志记录
 logger = setup_logger('api')
@@ -42,14 +42,17 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
     logger.info(f"Getting financial indicators for {symbol}...")
     try:
         # ��ȡʵʱ�������ݣ�������ֵ�͹�ֵ���ʣ�
-        logger.info("Fetching real-time quotes...")
-        stock_data_series = get_stock_spot_row(symbol)
-        if stock_data_series is None or stock_data_series.empty:
-            logger.warning(f"No real-time quotes found for {symbol}, defaulting to zeros.")
-            stock_data = {}
-        else:
-            logger.info("? Real-time quotes fetched")
-            stock_data = stock_data_series.to_dict()
+        logger.info("Fetching market snapshot...")
+        try:
+            snapshot = get_market_snapshot(symbol)
+            logger.info("✓ Market snapshot prepared")
+        except Exception as snapshot_err:  # noqa: BLE001
+            logger.warning("Market snapshot unavailable: %s", snapshot_err)
+            snapshot = {}
+        stock_data = {
+            "总市值": snapshot.get("market_cap", 0),
+            "流通市值": snapshot.get("market_cap", 0),
+        }
 
         logger.info("Fetching Sina financial indicators...")
         current_year = datetime.now().year
@@ -297,21 +300,19 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
 
 
 def get_market_data(symbol: str) -> Dict[str, Any]:
-    """获取市场数据"""
+    """获取市场数据（自研引擎 + LLM 快照）"""
     try:
-        stock_data = get_stock_spot_row(symbol)
-        if stock_data is None or stock_data.empty:
-            return {}
-
+        snapshot = get_market_snapshot(symbol)
         return {
-            "market_cap": float(stock_data.get("总市值", 0)),
-            "volume": float(stock_data.get("成交量", 0)),
-            # A股没有平均成交量，选用日成交量
-            "average_volume": float(stock_data.get("成交量", 0)),
-            "fifty_two_week_high": float(stock_data.get("52周最高", 0)),
-            "fifty_two_week_low": float(stock_data.get("52周最低", 0)),
+            "market_cap": snapshot.get("market_cap", 0.0),
+            "volume": snapshot.get("volume", 0.0),
+            "average_volume": snapshot.get("average_volume", snapshot.get("volume", 0.0)),
+            "fifty_two_week_high": snapshot.get("fifty_two_week_high", 0.0),
+            "fifty_two_week_low": snapshot.get("fifty_two_week_low", 0.0),
+            "summary": snapshot.get("summary", ""),
+            "confidence": snapshot.get("confidence", 0.0),
+            "news_count": snapshot.get("news_count", 0),
         }
-
     except Exception as e:
         logger.error(f"Error getting market data: {e}")
         return {}
@@ -390,20 +391,6 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
 
             if df is None or df.empty:
                 return pd.DataFrame()
-
-            df = df.rename(columns={
-                "日期": "date",
-                "开盘": "open",
-                "最高": "high",
-                "最低": "low",
-                "收盘": "close",
-                "成交量": "volume",
-                "成交额": "amount",
-                "振幅": "amplitude",
-                "涨跌幅": "pct_change",
-                "涨跌额": "change_amount",
-                "换手率": "turnover",
-            })
 
             df["date"] = pd.to_datetime(df["date"])
             return df

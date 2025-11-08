@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List
+
+from src.database import AkshareSQLiteCache
+from src.tools.news_crawler import get_stock_news
+from src.tools.openrouter_config import get_chat_completion
+from src.utils.logging_config import setup_logger
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+CACHE_PATH = BASE_DIR / "data" / "market_data_cache.db"
+SNAPSHOT_TABLE = "market_snapshot_cache"
+SNAPSHOT_TTL_SECONDS = 24 * 3600
+
+logger = setup_logger("market_snapshot")
+cache = AkshareSQLiteCache(CACHE_PATH)
+
+
+def _build_prompt(symbol: str, news_items: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    if not news_items:
+        news_block = "暂无最新新闻，请给出一个基于常识的高层次总结。"
+    else:
+        lines = []
+        for item in news_items[:10]:
+            lines.append(
+                f"标题：{item.get('title', '未知')}\n"
+                f"来源：{item.get('source', '未知')}\n"
+                f"时间：{item.get('publish_time', '')}\n"
+                f"内容：{item.get('content', '')}"
+            )
+        news_block = "\n\n".join(lines)
+
+    system_message = (
+        "你是市场数据分析师。请阅读输入的新闻要点，"
+        "输出一个JSON，包含以下字段：\n"
+        "- market_cap: 公司总市值，十进制数字，单位亿元人民币；\n"
+        "- volume: 当日成交量（万手），十进制数字；\n"
+        "- average_volume: 过去5日平均成交量（万手），十进制数字；\n"
+        "- fifty_two_week_high: 52周最高价（元）；\n"
+        "- fifty_two_week_low: 52周最低价（元）；\n"
+        "- confidence: 一个0-1之间的置信度，表示上述数据可信度；\n"
+        "- summary: 对当前市场状态的简短中文总结。\n"
+        "如果新闻中缺少精确数值，请根据报道做出合理估计，并注明含义。"
+    )
+    user_message = (
+        f"股票代码：{symbol}\n"
+        f"新闻要点：\n{news_block}\n\n"
+        "请严格返回一个JSON字符串，不要包含额外文本。"
+    )
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message},
+    ]
+
+
+def _parse_snapshot_response(raw: str) -> Dict[str, Any]:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            start = raw.index("{")
+            end = raw.rindex("}") + 1
+            return json.loads(raw[start:end])
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to parse snapshot JSON: %s", exc)
+            return {}
+
+
+def _sanitize_snapshot(data: Dict[str, Any]) -> Dict[str, float]:
+    def as_float(value: Any) -> float:
+        try:
+            cleaned = (
+                str(value)
+                .replace("亿", "e8")
+                .replace("万", "e4")
+                .replace(",", "")
+                .strip()
+            )
+            if cleaned.endswith("e8"):
+                return float(cleaned[:-2]) * 1e8
+            if cleaned.endswith("e4"):
+                return float(cleaned[:-2]) * 1e4
+            return float(cleaned)
+        except Exception:
+            return 0.0
+
+    return {
+        "market_cap": as_float(data.get("market_cap")),
+        "volume": as_float(data.get("volume")),
+        "average_volume": as_float(data.get("average_volume")),
+        "fifty_two_week_high": as_float(data.get("fifty_two_week_high")),
+        "fifty_two_week_low": as_float(data.get("fifty_two_week_low")),
+        "confidence": float(data.get("confidence", 0)) if data.get("confidence") not in (None, "") else 0.0,
+        "summary": str(data.get("summary", "")).strip(),
+    }
+
+
+def _generate_snapshot(symbol: str) -> Dict[str, Any]:
+    news_items = get_stock_news(symbol, max_news=20)
+    messages = _build_prompt(symbol, news_items)
+    llm_response = get_chat_completion(messages)
+    snapshot_raw = _parse_snapshot_response(llm_response or "{}")
+    sanitized = _sanitize_snapshot(snapshot_raw)
+    sanitized.setdefault("summary", "")
+    sanitized["news_count"] = len(news_items)
+    sanitized["generated_on"] = datetime.utcnow().isoformat()
+    return sanitized
+
+
+def get_market_snapshot(symbol: str, ttl_seconds: int = SNAPSHOT_TTL_SECONDS) -> Dict[str, Any]:
+    cached = cache.fetch_records(
+        table=SNAPSHOT_TABLE,
+        filters={"symbol": symbol},
+        ttl_seconds=ttl_seconds,
+        order_by='"缓存时间" DESC',
+        limit=1,
+    )
+    if cached:
+        record = _records_to_dict(cached[0])
+        logger.info("Market snapshot cache hit for %s", symbol)
+        return record
+
+    snapshot = _generate_snapshot(symbol)
+    record = {"symbol": symbol, **snapshot}
+    cache.upsert_records(SNAPSHOT_TABLE, [record], key_columns=["symbol"])
+    logger.info("Market snapshot refreshed for %s", symbol)
+    return record
+
+
+def _records_to_dict(record: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = dict(record)
+    cleaned.pop("缓存时间", None)
+    return cleaned

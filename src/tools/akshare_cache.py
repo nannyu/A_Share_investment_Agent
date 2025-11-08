@@ -1,17 +1,17 @@
-"""Cached AkShare helpers backed by SQLite."""
+"""Cached market data helpers backed by SQLite."""
 
 from __future__ import annotations
 
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional
 
 import akshare as ak
 import pandas as pd
 
 from src.database import AkshareSQLiteCache
 from src.network.proxy_manager import proxy_manager
+from src.tools.baostock_client import query_history_k_data_plus
 from src.utils.logging_config import setup_logger
 
 # Column name constants (use unicode escapes to avoid encoding glitches)
@@ -27,9 +27,8 @@ COL_ADJUST_TYPE = "\u590d\u6743\u7c7b\u578b"
 COL_TRADE_DATE = "trade_date"
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-CACHE_PATH = BASE_DIR / "data" / "akshare_cache.db"
-
-TRADING_CALENDAR_TABLE = "tool_trade_date_hist_sina"
+CACHE_PATH = BASE_DIR / "data" / "market_data_cache.db"
+HISTORY_TABLE = "baostock_history_k"
 
 logger = setup_logger("akshare_cache")
 cache = AkshareSQLiteCache(CACHE_PATH)
@@ -61,68 +60,6 @@ def _records_to_df(records: List[Dict]) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.DataFrame(records)
     return _drop_cache_columns(df)
-
-
-def _normalize_calendar_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or COL_TRADE_DATE not in df.columns:
-        return pd.DataFrame()
-    normalized = df[[COL_TRADE_DATE]].copy()
-    normalized[COL_TRADE_DATE] = pd.to_datetime(normalized[COL_TRADE_DATE]).dt.normalize()
-    return normalized
-
-
-def _refresh_trading_calendar() -> pd.DataFrame:
-    fetched = _call_with_retry(ak.tool_trade_date_hist_sina, TRADING_CALENDAR_TABLE)
-    if fetched is None or fetched.empty:
-        return pd.DataFrame()
-    cache.delete_records(TRADING_CALENDAR_TABLE)
-    cache.upsert_records(
-        TRADING_CALENDAR_TABLE,
-        fetched.to_dict("records"),
-        key_columns=[COL_TRADE_DATE],
-    )
-    return _normalize_calendar_df(fetched)
-
-
-@lru_cache(maxsize=1)
-def _load_trading_calendar_cached() -> pd.DataFrame:
-    cached = cache.fetch_records(table=TRADING_CALENDAR_TABLE)
-    df = _normalize_calendar_df(_records_to_df(cached))
-    if df.empty:
-        return _refresh_trading_calendar()
-    return df
-
-
-def _load_trading_calendar(force_refresh: bool = False) -> pd.DataFrame:
-    if force_refresh:
-        _load_trading_calendar_cached.cache_clear()
-        refreshed = _refresh_trading_calendar()
-        if refreshed.empty:
-            return refreshed
-    return _load_trading_calendar_cached()
-
-
-def _trading_days_between(start_date: datetime, end_date: datetime) -> List[pd.Timestamp]:
-    normalized_start = pd.Timestamp(start_date).normalize()
-    normalized_end = pd.Timestamp(end_date).normalize()
-    calendar = _load_trading_calendar()
-
-    if not calendar.empty:
-        min_day = calendar[COL_TRADE_DATE].min()
-        max_day = calendar[COL_TRADE_DATE].max()
-        if normalized_start < min_day or normalized_end > max_day:
-            calendar = _load_trading_calendar(force_refresh=True)
-
-    if calendar.empty:
-        logger.warning(
-            "Trading calendar unavailable; falling back to business-day range (weekends skipped)."
-        )
-        return list(pd.bdate_range(normalized_start, normalized_end))
-
-    mask = (calendar[COL_TRADE_DATE] >= normalized_start) & (
-        calendar[COL_TRADE_DATE] <= normalized_end
-    )
-    return list(calendar.loc[mask, COL_TRADE_DATE])
 
 
 def _resolve_exchange_symbol(symbol: str) -> str:
@@ -245,90 +182,72 @@ def get_price_history_df(
     start_date: datetime,
     end_date: datetime,
     adjust: str = "qfq",
-    ttl_seconds: Optional[int] = None,
+    ttl_seconds: Optional[int] = 24 * 3600,
 ) -> pd.DataFrame:
-    def _fetch_segment(seg_start: datetime, seg_end: datetime) -> pd.DataFrame:
-        data = _call_with_retry(
-            lambda: ak.stock_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                start_date=seg_start.strftime("%Y%m%d"),
-                end_date=seg_end.strftime("%Y%m%d"),
-                adjust=adjust,
-            ),
-            "stock_zh_a_hist",
-        )
-        if data is None or data.empty:
-            return pd.DataFrame()
-        data = data.copy()
-        data[COL_DATE] = pd.to_datetime(data["日期"]).dt.strftime("%Y-%m-%d")
-        data[COL_CODE] = symbol
-        data[COL_ADJUST_TYPE] = adjust
-        cache.upsert_records(
-            "stock_zh_a_hist",
-            data.to_dict("records"),
-            key_columns=[COL_CODE, COL_ADJUST_TYPE, COL_DATE],
-        )
-        data[COL_DATE] = pd.to_datetime(data[COL_DATE])
-        return data
-
-    filters = {COL_CODE: symbol, COL_ADJUST_TYPE: adjust}
+    ttl = ttl_seconds if ttl_seconds is not None else 24 * 3600
+    filters = {"symbol": symbol, "adjust_flag": adjust or ""}
     cached = cache.fetch_records(
-        table="stock_zh_a_hist",
+        table=HISTORY_TABLE,
         filters=filters,
-        ttl_seconds=ttl_seconds,
+        ttl_seconds=ttl,
+        order_by='"date" ASC',
     )
 
-    cached_frames: List[pd.DataFrame] = []
-    cached_dates: Sequence[pd.Timestamp] = []
     if cached:
         df_cached = _records_to_df(cached)
-        if COL_DATE in df_cached.columns:
-            df_cached[COL_DATE] = pd.to_datetime(df_cached[COL_DATE])
-            cached_dates = list(df_cached[COL_DATE].dt.normalize())
-            cached_frames.append(df_cached)
+        if not df_cached.empty:
+            df_cached["date"] = pd.to_datetime(df_cached["date"])
+            mask = (df_cached["date"] >= start_date) & (df_cached["date"] <= end_date)
+            subset = df_cached.loc[mask].copy()
+            if not subset.empty:
+                subset.sort_values("date", inplace=True)
+                return subset
 
-    def _missing_segments(
-        required_days: Sequence[pd.Timestamp], existing: Sequence[pd.Timestamp]
-    ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-        if not required_days:
-            return []
-        existing_set = set(existing)
-        segments: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
-        current_start: Optional[pd.Timestamp] = None
-        prev_day: Optional[pd.Timestamp] = None
-        for day in required_days:
-            if day in existing_set:
-                if current_start is not None:
-                    segments.append((current_start, prev_day))
-                    current_start = None
-            else:
-                if current_start is None:
-                    current_start = day
-                prev_day = day
-        if current_start is not None:
-            segments.append((current_start, prev_day))
-        return segments
-
-    required_days = _trading_days_between(start_date, end_date)
-    missing_segments = _missing_segments(required_days, cached_dates)
-    for seg_start, seg_end in missing_segments:
-        fetched = _fetch_segment(seg_start, seg_end)
-        if not fetched.empty:
-            cached_frames.append(fetched)
-
-    if not cached_frames:
+    fetched = query_history_k_data_plus(
+        symbol=symbol,
+        start_date=start_date,
+        end_date=end_date,
+        adjust=adjust,
+    )
+    if fetched.empty:
         return pd.DataFrame()
 
-    combined = pd.concat(cached_frames, ignore_index=True)
-    combined[COL_DATE] = pd.to_datetime(combined[COL_DATE])
-    combined = combined.drop_duplicates(
-        subset=[COL_CODE, COL_ADJUST_TYPE, COL_DATE], keep="last"
+    numeric_cols = ["open", "high", "low", "close", "preclose", "volume", "amount"]
+    for col in numeric_cols:
+        fetched[col] = pd.to_numeric(fetched[col], errors="coerce")
+    fetched["pct_change"] = pd.to_numeric(fetched["pctChg"], errors="coerce") / 100.0
+    fetched["turnover"] = pd.to_numeric(fetched["turn"], errors="coerce") / 100.0
+    fetched["change_amount"] = fetched["close"] - fetched["preclose"]
+    base = fetched["preclose"].replace(0, pd.NA)
+    fetched["amplitude"] = ((fetched["high"] - fetched["low"]) / base) * 100
+    fetched["amplitude"] = fetched["amplitude"].fillna(0)
+    fetched["date"] = pd.to_datetime(fetched["date"])
+    fetched["symbol"] = symbol
+    fetched["adjust_flag"] = adjust or ""
+
+    columns = [
+        "symbol",
+        "adjust_flag",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "amplitude",
+        "pct_change",
+        "change_amount",
+        "turnover",
+    ]
+    prepared = fetched[columns]
+    cache.upsert_records(
+        HISTORY_TABLE,
+        prepared.to_dict("records"),
+        key_columns=["symbol", "adjust_flag", "date"],
     )
-    mask = (combined[COL_DATE] >= start_date) & (combined[COL_DATE] <= end_date)
-    result = combined.loc[mask].copy()
-    result.sort_values(COL_DATE, inplace=True)
-    return result
+    _log_cache_upsert(HISTORY_TABLE, symbol, len(prepared))
+    return prepared
 
 def get_stock_news(symbol: str, ttl_seconds: int = 2 * 3600) -> pd.DataFrame:
     cached = cache.fetch_records(

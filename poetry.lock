@@ -253,6 +253,20 @@ files = [
 ]
 
 [[package]]
+name = "baostock"
+version = "0.8.9"
+description = "A tool for obtaining historical data of China stock market"
+optional = false
+python-versions = "*"
+files = [
+    {file = "baostock-0.8.9-py3-none-any.whl", hash = "sha256:7a51fb30cd6b4325f5517198e350dc2fffaaab2923cd132b9f747b8b73ae7303"},
+    {file = "baostock-0.8.9.tar.gz", hash = "sha256:8169cdbed14fa442ace63c59549bef3f92b0c3dd1df9e5d9069f7bd04a76b0da"},
+]
+
+[package.dependencies]
+pandas = ">=0.18.0"
+
+[[package]]
 name = "beautifulsoup4"
 version = "4.13.4"
 description = "Screen-scraping library"
@@ -3952,4 +3966,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "df4f2c658abea22975affd3e6eff0628600ea45d5c77f889c81b23ba9032775e"
+content-hash = "2120b0a06e6c6af84043e86c339064a6452dd22272cecce5ef4f43d75cdfd796"
