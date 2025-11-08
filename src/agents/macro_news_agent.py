@@ -69,7 +69,7 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
                 )
                 if looks_invalid:
                     show_workflow_status(
-                        f"{agent_name}: �ӻ������ {today_str} �ĺ�������ܽᱻ��־Ϊ�쳣�����·�������.")
+                        f"{agent_name}: 从缓存加载 {today_str} 的宏观新闻总结被标记为异常，将重新获取。")
                     from_cache = False
                 else:
                     summary = cached_summary
@@ -77,7 +77,7 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
                         "retrieved_news_count", 0)  # Get cached news count
                     from_cache = True
                     show_workflow_status(
-                        f"{agent_name}: �ӻ������ {today_str} �ĺ�������ܽᡣ")
+                        f"{agent_name}: 从缓存加载 {today_str} 的宏观新闻总结。")
                     show_agent_reasoning(
                         f"Loaded macro summary for {today_str} from cache. News count: {retrieved_news_count}", agent_name)
         except json.JSONDecodeError:
@@ -131,12 +131,12 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
                     f"LLM analysis complete. Summary (first 100 chars): {summary[:100]}...", agent_name)
 
         except Exception as e:
-            error_message = f"{agent_name}: ִ�г���: {e}"
+            error_message = f"{agent_name}: 执行出错: {e}"
             show_workflow_status(error_message)
             show_agent_reasoning(
                 f"Exception during execution: {str(e)}", agent_name)
             summary_failed = True
-            summary = f"������ŷ��������з�������: {str(e)}"
+            summary = f"宏观新闻分析过程中发生错误: {str(e)}"
     # 保存总结到JSON文件 (only if not from cache and successful, or if updating existing)
     if not from_cache:  # Also save if summary was updated, even if initially from cache but e.g. re-analyzed
         show_workflow_status(
