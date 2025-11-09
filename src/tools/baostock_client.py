@@ -105,3 +105,19 @@ def query_history_k_data_plus(
 
     df = pd.DataFrame(rows, columns=FIELD_SET)
     return df
+
+
+def query_trade_dates(start_date, end_date) -> pd.DataFrame:
+    ensure_login()
+    start = _coerce_dates(start_date)
+    end = _coerce_dates(end_date)
+    rs = bs.query_trade_dates(start_date=start, end_date=end)
+    if rs.error_code != "0":
+        raise RuntimeError(f"BaoStock trade date query failed[{rs.error_code}]: {rs.error_msg}")
+    rows: List[List[str]] = []
+    while rs.error_code == "0" and rs.next():
+        rows.append(rs.get_row_data())
+    if not rows:
+        return pd.DataFrame(columns=["calendar_date", "is_trading_day"])
+    df = pd.DataFrame(rows, columns=rs.fields)
+    return df

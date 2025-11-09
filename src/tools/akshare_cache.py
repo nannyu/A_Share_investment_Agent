@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import akshare as ak
 import pandas as pd
 
 from src.database import AkshareSQLiteCache
 from src.network.proxy_manager import proxy_manager
-from src.tools.baostock_client import query_history_k_data_plus
+from src.tools.baostock_client import query_history_k_data_plus, query_trade_dates
 from src.utils.logging_config import setup_logger
 
 # Column name constants (use unicode escapes to avoid encoding glitches)
@@ -177,54 +177,54 @@ def get_financial_report(
     return df
 
 
-def get_price_history_df(
-    symbol: str,
-    start_date: datetime,
-    end_date: datetime,
-    adjust: str = "qfq",
-    ttl_seconds: Optional[int] = 24 * 3600,
-) -> pd.DataFrame:
-    ttl = ttl_seconds if ttl_seconds is not None else 24 * 3600
-    filters = {"symbol": symbol, "adjust_flag": adjust or ""}
-    cached = cache.fetch_records(
-        table=HISTORY_TABLE,
-        filters=filters,
-        ttl_seconds=ttl,
-        order_by='"date" ASC',
-    )
+def _expected_trading_days(start_date: datetime, end_date: datetime) -> Sequence[pd.Timestamp]:
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+    df = query_trade_dates(start_date, end_date)
+    if df.empty:
+        return pd.bdate_range(start=start_date, end=end_date)
+    df["calendar_date"] = pd.to_datetime(df["calendar_date"])
+    trading = df[df["is_trading_day"].astype(int) == 1]["calendar_date"].dt.normalize()
+    return trading.tolist()
 
-    if cached:
-        df_cached = _records_to_df(cached)
-        if not df_cached.empty:
-            df_cached["date"] = pd.to_datetime(df_cached["date"])
-            mask = (df_cached["date"] >= start_date) & (df_cached["date"] <= end_date)
-            subset = df_cached.loc[mask].copy()
-            if not subset.empty:
-                subset.sort_values("date", inplace=True)
-                return subset
 
-    fetched = query_history_k_data_plus(
-        symbol=symbol,
-        start_date=start_date,
-        end_date=end_date,
-        adjust=adjust,
-    )
-    if fetched.empty:
+def _missing_segments(
+    expected_days: Sequence[pd.Timestamp],
+    cached_days: Sequence[pd.Timestamp],
+) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+    cached_set = {day.normalize() for day in cached_days}
+    segments: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    seg_start: Optional[pd.Timestamp] = None
+    seg_end: Optional[pd.Timestamp] = None
+    for day in expected_days:
+        normalized = day.normalize()
+        if normalized not in cached_set:
+            if seg_start is None:
+                seg_start = day
+            seg_end = day
+        elif seg_start is not None:
+            segments.append((seg_start, seg_end))
+            seg_start = seg_end = None
+    if seg_start is not None:
+        segments.append((seg_start, seg_end or seg_start))
+    return segments
+
+
+def _prepare_history_frame(raw_df: pd.DataFrame, symbol: str, adjust: str) -> pd.DataFrame:
+    if raw_df.empty:
         return pd.DataFrame()
-
     numeric_cols = ["open", "high", "low", "close", "preclose", "volume", "amount"]
     for col in numeric_cols:
-        fetched[col] = pd.to_numeric(fetched[col], errors="coerce")
-    fetched["pct_change"] = pd.to_numeric(fetched["pctChg"], errors="coerce") / 100.0
-    fetched["turnover"] = pd.to_numeric(fetched["turn"], errors="coerce") / 100.0
-    fetched["change_amount"] = fetched["close"] - fetched["preclose"]
-    base = fetched["preclose"].replace(0, pd.NA)
-    fetched["amplitude"] = ((fetched["high"] - fetched["low"]) / base) * 100
-    fetched["amplitude"] = fetched["amplitude"].fillna(0)
-    fetched["date"] = pd.to_datetime(fetched["date"])
-    fetched["symbol"] = symbol
-    fetched["adjust_flag"] = adjust or ""
-
+        raw_df[col] = pd.to_numeric(raw_df[col], errors="coerce")
+    raw_df["pct_change"] = pd.to_numeric(raw_df["pctChg"], errors="coerce") / 100.0
+    raw_df["turnover"] = pd.to_numeric(raw_df["turn"], errors="coerce") / 100.0
+    raw_df["change_amount"] = raw_df["close"] - raw_df["preclose"]
+    base = raw_df["preclose"].replace(0, pd.NA)
+    raw_df["amplitude"] = ((raw_df["high"] - raw_df["low"]) / base) * 100
+    raw_df["amplitude"] = raw_df["amplitude"].fillna(0)
+    raw_df["date"] = pd.to_datetime(raw_df["date"])
+    raw_df["symbol"] = symbol
+    raw_df["adjust_flag"] = adjust or ""
     columns = [
         "symbol",
         "adjust_flag",
@@ -240,14 +240,68 @@ def get_price_history_df(
         "change_amount",
         "turnover",
     ]
-    prepared = fetched[columns]
+    return raw_df[columns]
+
+
+def _cache_history_rows(df: pd.DataFrame) -> None:
+    if df.empty:
+        return
     cache.upsert_records(
         HISTORY_TABLE,
-        prepared.to_dict("records"),
+        df.to_dict("records"),
         key_columns=["symbol", "adjust_flag", "date"],
     )
-    _log_cache_upsert(HISTORY_TABLE, symbol, len(prepared))
-    return prepared
+    _log_cache_upsert(HISTORY_TABLE, df.iloc[0]["symbol"], len(df))
+
+
+def get_price_history_df(
+    symbol: str,
+    start_date: datetime,
+    end_date: datetime,
+    adjust: str = "qfq",
+    ttl_seconds: Optional[int] = None,  # kept for backward compatibility, unused
+) -> pd.DataFrame:
+    filters = {"symbol": symbol, "adjust_flag": adjust or ""}
+    cached_records = cache.fetch_records(
+        table=HISTORY_TABLE,
+        filters=filters,
+        order_by='"date" ASC',
+    )
+
+    cached_frames: List[pd.DataFrame] = []
+    cached_dates: List[pd.Timestamp] = []
+    if cached_records:
+        df_cached = _records_to_df(cached_records)
+        if not df_cached.empty:
+            df_cached["date"] = pd.to_datetime(df_cached["date"])
+            cached_frames.append(df_cached)
+            cached_dates = list(df_cached["date"].dt.normalize())
+
+    expected_days = _expected_trading_days(start_date, end_date)
+    missing_segments = _missing_segments(expected_days, cached_dates)
+
+    new_frames: List[pd.DataFrame] = []
+    for seg_start, seg_end in missing_segments:
+        raw = query_history_k_data_plus(
+            symbol=symbol,
+            start_date=seg_start.strftime("%Y-%m-%d"),
+            end_date=seg_end.strftime("%Y-%m-%d"),
+            adjust=adjust,
+        )
+        prepared = _prepare_history_frame(raw, symbol, adjust)
+        if not prepared.empty:
+            _cache_history_rows(prepared)
+            new_frames.append(prepared)
+
+    if not cached_frames and not new_frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(cached_frames + new_frames, ignore_index=True)
+    combined.drop_duplicates(subset=["symbol", "adjust_flag", "date"], keep="last", inplace=True)
+    mask = (combined["date"] >= pd.to_datetime(start_date)) & (combined["date"] <= pd.to_datetime(end_date))
+    result = combined.loc[mask].copy()
+    result.sort_values("date", inplace=True)
+    return result
 
 def get_stock_news(symbol: str, ttl_seconds: int = 2 * 3600) -> pd.DataFrame:
     cached = cache.fetch_records(
