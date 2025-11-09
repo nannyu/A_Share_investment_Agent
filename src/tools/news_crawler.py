@@ -13,7 +13,7 @@ from src.tools.akshare_cache import get_stock_news
 try:
     from src.crawler.search import google_search_sync, SearchOptions
 except ImportError:
-    print("警告: 无法导入新的搜索模块，将回退到 akshare")
+    print("⚠️ 警告: 无法导入新的搜索模块，将回退到 akshare")
     google_search_sync = None
     SearchOptions = None
 
@@ -41,7 +41,7 @@ def build_search_query(symbol: str, date: str = None) -> str:
             # Google 搜索时间语法：after:YYYY-MM-DD before:YYYY-MM-DD
             base_query += f" after:{start_date.strftime('%Y-%m-%d')} before:{date}"
         except ValueError:
-            print(f"日期格式错误: {date}，忽略时间限制")
+            print(f"⚠️ 日期格式错误: {date}，忽略时间限制")
 
     # 限制新闻网站 - 只选择主要的财经网站
     news_sites = [
@@ -144,12 +144,12 @@ def get_stock_news_via_akshare(symbol: str, max_news: int = 10) -> list:
     try:
         news_df = get_stock_news(symbol)
         if news_df is None or news_df.empty:
-            print(f"未获取到{symbol}的新闻数据")
+            print(f"⚠️ 未获取到 {symbol} 的新闻数据")
             return []
 
         available_news_count = len(news_df)
         if available_news_count < max_news:
-            print(f"提示: 实际可获取的新闻数量({available_news_count})少于目标({max_news})")
+            print(f"ℹ️ 提示: 实际可获取的新闻数量({available_news_count})少于目标({max_news})")
             max_news = available_news_count
 
         news_list = []
@@ -169,14 +169,14 @@ def get_stock_news_via_akshare(symbol: str, max_news: int = 10) -> list:
                 }
                 news_list.append(news_item)
             except Exception as err:
-                print(f"转换新闻记录时出错: {err}")
+                print(f"⚠️ 转换新闻记录时出错: {err}")
                 continue
 
         news_list.sort(key=lambda x: x.get("publish_time", ""), reverse=True)
         return news_list[:max_news]
 
     except Exception as e:
-        print(f"akshare 获取新闻数据时出错: {e}")
+        print(f"⚠️ akshare 获取新闻数据时出错: {e}")
         return []
 
 
@@ -202,19 +202,19 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
 
     # 构建新闻文件路径
     news_dir = os.path.join("src", "data", "stock_news")
-    print(f"新闻保存目录: {news_dir}")
+    print(f"📁 新闻保存目录: {news_dir}")
 
     # 确保目录存在
     try:
         os.makedirs(news_dir, exist_ok=True)
-        print(f"成功创建或确认目录存在: {news_dir}")
+        print(f"✅ 成功创建或确认目录: {news_dir}")
     except Exception as e:
-        print(f"创建目录失败: {e}")
+        print(f"❌ 创建目录失败: {e}")
         return []
 
     # 缓存文件名包含日期信息
     news_file = os.path.join(news_dir, f"{symbol}_news_{cache_date}.json")
-    print(f"新闻文件路径: {news_file}")
+    print(f"📝 新闻文件路径: {news_file}")
 
     # 检查缓存是否存在且有效
     cached_news = []
@@ -240,19 +240,19 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
 
                     if len(cached_news) >= max_news:
                         print(
-                            f"使用缓存的新闻数据: {news_file} (缓存数量: {len(cached_news)})")
+                            f"📦 使用缓存新闻: {news_file} (缓存数量: {len(cached_news)})")
                         return cached_news[:max_news]
                     else:
                         print(
-                            f"缓存的新闻数量({len(cached_news)})不足，需要获取更多新闻({max_news}条)")
+                            f"📦 缓存仅有 {len(cached_news)} 条，需补齐到 {max_news} 条，准备继续抓取")
             else:
-                print(f"缓存文件已过期，将重新获取新闻")
+                print(f"🕒 缓存超过 {cache_expiry_minutes} 分钟，重新获取新闻")
 
         except Exception as e:
-            print(f"读取缓存文件失败: {e}")
+            print(f"⚠️ 读取缓存文件失败: {e}")
             cached_news = []
 
-    print(f'开始获取{symbol}的新闻数据...')
+    print(f'🚀 开始获取 {symbol} 的新闻数据...')
 
     # 计算需要获取的新闻数量
     need_more_news = max_news - len(cached_news)
@@ -262,11 +262,11 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
     new_news_list = []
     if google_search_sync and SearchOptions:
         try:
-            print("使用 Google 搜索获取新闻...")
+            print("🌐 使用 Google 搜索获取新闻...")
 
             # 构建搜索查询
             search_query = build_search_query(symbol, date)
-            print(f"搜索查询: {search_query}")
+            print(f"🔍 搜索查询: {search_query}")
 
             # 执行搜索
             search_options = SearchOptions(
@@ -282,16 +282,16 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
                 new_news_list = convert_search_results_to_news_format(
                     search_response.results, symbol)
 
-                print(f"通过 Google 搜索成功获取到{len(new_news_list)}条新闻")
+                print(f"✅ Google 搜索获取 {len(new_news_list)} 条新闻")
             else:
-                print("Google 搜索未返回有效结果，尝试回退到 akshare")
+                print("⚠️ Google 搜索未返回有效结果，回退到 akshare")
 
         except Exception as e:
-            print(f"Google 搜索获取新闻时出错: {e}，回退到 akshare")
+            print(f"⚠️ Google 搜索出错({e})，回退到 akshare")
 
     # 如果 Google 搜索失败，回退到 akshare
     if not new_news_list:
-        print("使用 akshare 获取新闻...")
+        print("🀄 使用 akshare 获取新闻...")
         new_news_list = get_stock_news_via_akshare(symbol, fetch_count)
 
     # 合并缓存和新获取的新闻，去重
@@ -308,7 +308,7 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
         # 合并新闻列表
         combined_news = cached_news + unique_new_news
         print(
-            f"合并缓存新闻({len(cached_news)}条)和新获取新闻({len(unique_new_news)}条)，总计{len(combined_news)}条")
+            f"➕ 合并缓存 {len(cached_news)} 条 + 新增 {len(unique_new_news)} 条 = {len(combined_news)} 条")
     else:
         combined_news = new_news_list or cached_news
 
@@ -337,9 +337,9 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
             }
             with open(news_file, 'w', encoding='utf-8') as f:
                 json.dump(save_data, f, ensure_ascii=False, indent=2)
-            print(f"成功保存{len(combined_news)}条新闻到文件: {news_file}")
+            print(f"💾 成功保存 {len(combined_news)} 条新闻 -> {news_file}")
         except Exception as e:
-            print(f"保存新闻数据到文件时出错: {e}")
+            print(f"❌ 保存新闻数据失败: {e}")
 
     return final_news_list
 
@@ -413,19 +413,19 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
 
     # 检查缓存
     if os.path.exists(cache_file):
-        print("发现情感分析缓存文件")
+        print("📦 发现情感分析缓存文件")
         try:
             with open(cache_file, 'r', encoding='utf-8') as f:
                 cache = json.load(f)
                 if news_key in cache:
-                    print("使用缓存的情感分析结果")
+                    print("✅ 使用匹配的情感分析缓存结果")
                     return cache[news_key]
-                print("未找到匹配的情感分析缓存")
+                print("ℹ️ 未找到匹配的情感分析缓存")
         except Exception as e:
-            print(f"读取情感分析缓存出错: {e}")
+            print(f"⚠️ 读取情感分析缓存出错: {e}")
             cache = {}
     else:
-        print("未找到情感分析缓存文件，将创建新文件")
+        print("📄 未找到情感分析缓存文件，将创建新文件")
         cache = {}
 
     # 准备系统消息
@@ -470,37 +470,70 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
         "content": f"请分析以下A股上市公司相关新闻的情感倾向：\n\n{news_content}\n\n请直接返回一个数字，范围是-1到1，无需解释。"
     }
 
-    try:
-        # 获取LLM响应
-        result = get_chat_completion([system_message, user_message])
-        if result is None:
-            print("Error: PI error occurred, LLM returned None")
-            return 0.0
-
-        preview = str(result)
-        print(f"[sentiment] Raw LLM response: {preview[:200]}")
-        try:
-            sentiment_score = _parse_sentiment_score(preview)
-        except ValueError as e:
-            print(f"Error parsing sentiment score: {e}")
-            return 0.0
-
-        print(f"[sentiment] Parsed score: {sentiment_score}")
-
-        # 确保在-1到1之间
-        sentiment_score = max(-1.0, min(1.0, sentiment_score))
-
-        # 写入缓存
-        cache[news_key] = sentiment_score
-        try:
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Error writing cache: {e}")
-
-        return sentiment_score
-
-    except Exception as e:
-        print(f"Error analyzing news sentiment: {e}")
-        return 0.0  # 发生异常时退回中性评分
+    try:
+
+        # 获取LLM响应
+
+        result = get_chat_completion([system_message, user_message])
+
+        if result is None:
+
+            print("❌ Error: LLM 返回 None，无法生成情感分数")
+
+            return 0.0
+
+
+
+        preview = str(result)
+
+        print(f"🗒️ [sentiment] LLM 原始响应: {preview[:200]}")
+
+        try:
+
+            sentiment_score = _parse_sentiment_score(preview)
+
+        except ValueError as e:
+
+            print(f"⚠️ 解析情感分数失败: {e}")
+
+            return 0.0
+
+
+
+        print(f"✅ [sentiment] 解析得分: {sentiment_score}")
+
+
+
+        # 确保在-1到1之间
+
+        sentiment_score = max(-1.0, min(1.0, sentiment_score))
+
+
+
+        # 写入缓存
+
+        cache[news_key] = sentiment_score
+
+        try:
+
+            with open(cache_file, 'w', encoding='utf-8') as f:
+
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+
+        except Exception as e:
+
+            print(f"⚠️ 写入情感缓存失败: {e}")
+
+
+
+        return sentiment_score
+
+
+
+    except Exception as e:
+
+        print(f"❌ 情感分析过程中出错: {e}")
+
+        return 0.0  # 发生异常时退回中性评分
+
 

@@ -48,45 +48,45 @@ def researcher_bull_agent(state: AgentState):
     # Technical Analysis
     if technical_signals["signal"] == "bullish":
         bullish_points.append(
-            f"Technical indicators show bullish momentum with {technical_signals['confidence']} confidence")
+            f"技术指标呈现多头动能，置信度 {technical_signals['confidence']}")
         confidence_scores.append(
             float(str(technical_signals["confidence"]).replace("%", "")) / 100)
     else:
         bullish_points.append(
-            "Technical indicators may be conservative, presenting buying opportunities")
+            "技术指标暂时保守，可能孕育逢低布局的机会")
         confidence_scores.append(0.3)
 
     # Fundamental Analysis
     if fundamental_signals["signal"] == "bullish":
         bullish_points.append(
-            f"Strong fundamentals with {fundamental_signals['confidence']} confidence")
+            f"基本面表现稳健，置信度 {fundamental_signals['confidence']}")
         confidence_scores.append(
             float(str(fundamental_signals["confidence"]).replace("%", "")) / 100)
     else:
         bullish_points.append(
-            "Company fundamentals show potential for improvement")
+            "公司基本面仍有改善空间，可期待逐步修复")
         confidence_scores.append(0.3)
 
     # Sentiment Analysis
     if sentiment_signals["signal"] == "bullish":
         bullish_points.append(
-            f"Positive market sentiment with {sentiment_signals['confidence']} confidence")
+            f"市场情绪偏正面，置信度 {sentiment_signals['confidence']}")
         confidence_scores.append(
             float(str(sentiment_signals["confidence"]).replace("%", "")) / 100)
     else:
         bullish_points.append(
-            "Market sentiment may be overly pessimistic, creating value opportunities")
+            "当前情绪可能过度悲观，反而带来价值型买点")
         confidence_scores.append(0.3)
 
     # Valuation Analysis
     if valuation_signals["signal"] == "bullish":
         bullish_points.append(
-            f"Stock appears undervalued with {valuation_signals['confidence']} confidence")
+            f"估值具备吸引力，置信度 {valuation_signals['confidence']}")
         confidence_scores.append(
             float(str(valuation_signals["confidence"]).replace("%", "")) / 100)
     else:
         bullish_points.append(
-            "Current valuation may not fully reflect growth potential")
+            "当前估值尚未反映未来增长弹性")
         confidence_scores.append(0.3)
 
     # Calculate overall bullish confidence
@@ -96,7 +96,7 @@ def researcher_bull_agent(state: AgentState):
         "perspective": "bullish",
         "confidence": avg_confidence,
         "thesis_points": bullish_points,
-        "reasoning": "Bullish thesis based on comprehensive analysis of technical, fundamental, sentiment, and valuation factors"
+        "reasoning": "综合技术、基本面、情绪与估值信号，整体观点偏多，建议关注顺势布局机会"
     }
 
     message = HumanMessage(

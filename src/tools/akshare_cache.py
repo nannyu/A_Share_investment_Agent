@@ -279,6 +279,20 @@ def get_price_history_df(
 
     expected_days = _expected_trading_days(start_date, end_date)
     missing_segments = _missing_segments(expected_days, cached_dates)
+    if not missing_segments:
+        logger.info(
+            "📦 Price history cache satisfied for %s（%d 个交易日）",
+            symbol,
+            len(expected_days),
+        )
+    else:
+        missing_days = sum((seg_end - seg_start).days + 1 for seg_start, seg_end in missing_segments)
+        logger.info(
+            "🔄 Price history cache 缺少 %d 个交易日，共 %d 个区间，正在增量拉取 %s",
+            missing_days,
+            len(missing_segments),
+            symbol,
+        )
 
     new_frames: List[pd.DataFrame] = []
     for seg_start, seg_end in missing_segments:
@@ -301,6 +315,8 @@ def get_price_history_df(
     mask = (combined["date"] >= pd.to_datetime(start_date)) & (combined["date"] <= pd.to_datetime(end_date))
     result = combined.loc[mask].copy()
     result.sort_values("date", inplace=True)
+    source_tag = "📊 数据来源: 缓存" if not new_frames else "📊 数据来源: 缓存+增量刷新"
+    logger.info("%s，标的=%s，输出行数=%d", source_tag, symbol, len(result))
     return result
 
 def get_stock_news(symbol: str, ttl_seconds: int = 2 * 3600) -> pd.DataFrame:

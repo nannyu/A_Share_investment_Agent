@@ -1,6 +1,7 @@
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 import json
+import re
 from typing import Any, Dict
 from src.utils.logging_config import setup_logger
 
@@ -59,11 +60,37 @@ def _normalize_macro_news_payload(raw_value: Any) -> Dict[str, Any]:
     return payload
 
 
+def _parse_decision_json(raw_text: str) -> Dict[str, Any]:
+    if raw_text is None:
+        raise ValueError("LLM returned None for portfolio decision")
+    text = raw_text.strip()
+    if not text:
+        raise ValueError("LLM returned empty string for portfolio decision")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Remove surrounding code fences like ```json ... ```
+        if text.startswith("```"):
+            fence_match = re.match(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL | re.IGNORECASE)
+            if fence_match:
+                candidate = fence_match.group(1).strip()
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    text = candidate  # continue with fallback extraction
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = text[start : end + 1]
+            return json.loads(candidate)
+    raise ValueError("Unable to parse LLM decision JSON")
+
+
 @agent_endpoint("portfolio_management", "负责投资组合管理和最终交易决策")
 def portfolio_management_agent(state: AgentState):
     """Responsible for portfolio management"""
     agent_name = "portfolio_management_agent"
-    logger.info(f"\n--- DEBUG: {agent_name} START ---")
+    logger.info("📊 Portfolio Manager start (messages=%d)", len(state["messages"]))
 
     # Log raw incoming messages
     # logger.info(
@@ -80,6 +107,10 @@ def portfolio_management_agent(state: AgentState):
         unique_incoming_messages[msg.name] = msg
 
     cleaned_messages_for_processing = list(unique_incoming_messages.values())
+    logger.info(
+        "📥 Aggregated最新消息: %s",
+        ", ".join(sorted(unique_incoming_messages.keys())),
+    )
     # logger.info(
     # f"--- DEBUG: {agent_name} CLEANED messages for processing: {[msg.name for msg in cleaned_messages_for_processing]} ---")
 
@@ -142,6 +173,13 @@ def portfolio_management_agent(state: AgentState):
         f"新闻条数: {macro_news_payload.get('news_count', 0)}, "
         f"来源: {'缓存' if macro_news_payload.get('from_cache') else '实时'}"
     )
+    logger.info(
+        "🌍 宏观摘要: signal=%s score=%s cache=%s news=%d",
+        macro_news_payload["signal"],
+        macro_news_payload["score"],
+        macro_news_payload.get("from_cache"),
+        macro_news_payload.get("news_count", 0),
+    )
     market_wide_news_summary_content = macro_news_prompt_block
     # Optional: also try to get the message object for consistency in agent_signals, though data field is primary source
     macro_news_agent_message_obj = get_latest_message_by_name(
@@ -174,11 +212,13 @@ def portfolio_management_agent(state: AgentState):
             5. Use technical analysis for timing
             6. Consider sentiment for final adjustment
 
-            Provide the following in your output JSON:
+            FORMAT REQUIREMENTS (非常重要):
+            - 只输出一个 JSON 字符串，不要添加任何额外文字、代码块或解释。
+            - JSON 字段必须包含：
             - "action": "buy" | "sell" | "hold",
             - "quantity": <positive integer>
             - "confidence": <float between 0 and 1>
-            - "agent_signals": <list of agent signals including agent name, signal (bullish | bearish | neutral), and their confidence>.
+            - "agent_signals": <list of agent signals including agent_name, signal (bullish | bearish | neutral), confidence (0-1 float), optional reasoning字段>
               IMPORTANT: Your 'agent_signals' list MUST include entries for:
                 - "technical_analysis"
                 - "fundamental_analysis"
@@ -187,7 +227,11 @@ def portfolio_management_agent(state: AgentState):
                 - "risk_management"
                 - "selected_stock_macro_analysis" (representing the tool-based macro input from macro_analyst_agent)
                 - "market_wide_news_summary(沪深300指数)" (representing the daily news summary input from macro_news_agent - provide a brief signal like bullish/bearish/neutral for the news summary itself, or state if it was primarily factored into overall reasoning with confidence reflecting its impact)
-            - "reasoning": <concise explanation of the decision including how you weighted ALL signals, including both macro inputs>
+            - "reasoning": <简明的中文解释，说明如何权衡所有信号（包括两个宏观输入）得出结论>
+
+            语言要求:
+            - 所有文字描述（reasoning 以及 agent_signals 中的文字字段）必须使用中文。
+            - 如果某项数据缺失，请在 JSON 中说明“暂无数据”，不要输出英文占位词。
 
             Trading Rules:
             - Never exceed risk management position limits
@@ -225,7 +269,9 @@ def portfolio_management_agent(state: AgentState):
         agent_name, f"Preparing LLM. User msg includes: TA, FA, Sent, Val, Risk, GeneralMacro, MarketNews.")
 
     llm_interaction_messages = [system_message, user_message]
+    logger.info("🤖 Portfolio Manager 调用 LLM 生成决策...")
     llm_response_content = get_chat_completion(llm_interaction_messages)
+    logger.info("✅ Portfolio Manager LLM 调用完成 (响应长度=%s)", len(llm_response_content or ""))
 
     current_metadata = state["metadata"]
     current_metadata["current_agent_name"] = agent_name
@@ -237,6 +283,7 @@ def portfolio_management_agent(state: AgentState):
     if llm_response_content is None:
         show_agent_reasoning(
             agent_name, "LLM call failed. Using default conservative decision.")
+        logger.error("❌ Portfolio Manager LLM 调用失败，使用默认 hold 决策")
         # Ensure the dummy response matches the expected structure for agent_signals
         llm_response_content = json.dumps({
             "action": "hold",
@@ -272,18 +319,25 @@ def portfolio_management_agent(state: AgentState):
 
     agent_decision_details_value = {}
     try:
-        decision_json = json.loads(llm_response_content)
+        decision_json = _parse_decision_json(llm_response_content)
         agent_decision_details_value = {
             "action": decision_json.get("action"),
             "quantity": decision_json.get("quantity"),
             "confidence": decision_json.get("confidence"),
             "reasoning_snippet": decision_json.get("reasoning", "")[:150] + "..."
         }
-    except json.JSONDecodeError:
+        logger.info(
+            "📈 LLM 决策: action=%s quantity=%s confidence=%s",
+            agent_decision_details_value["action"],
+            agent_decision_details_value["quantity"],
+            agent_decision_details_value["confidence"],
+        )
+    except (json.JSONDecodeError, ValueError) as parse_err:
         agent_decision_details_value = {
             "error": "Failed to parse LLM decision JSON from portfolio manager",
             "raw_response_snippet": llm_response_content[:200] + "..."
         }
+        logger.error("⚠️ 无法解析投资组合 LLM 决策 JSON: %s", parse_err)
 
     show_workflow_status(f"{agent_name}: --- Portfolio Manager Completed ---")
 

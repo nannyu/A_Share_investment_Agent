@@ -95,25 +95,25 @@ def debate_room_agent(state: AgentState):
 
     # 构建发送给 LLM 的提示
     llm_prompt = """
-你是一位专业的金融分析师，请分析以下投资研究员的观点，并给出你的第三方分析:
-
-"""
+    你是一位专业的金融分析师，请分析以下投资研究员的观点，并给出你的第三方分析。
+    
+    """
     for perspective, data in all_perspectives.items():
         llm_prompt += f"\n{perspective.upper()} 观点 (置信度: {data['confidence']}):\n"
         for point in data["thesis_points"]:
             llm_prompt += f"- {point}\n"
-
+    
     llm_prompt += """
-请提供以下格式的 JSON 回复:
-{
-    "analysis": "你的详细分析，评估各方观点的优劣，并指出你认为最有说服力的论点",
-    "score": 0.5,  // 你的评分，从 -1.0(极度看空) 到 1.0(极度看多)，0 表示中性
-    "reasoning": "你给出这个评分的简要理由"
-}
-
-务必确保你的回复是有效的 JSON 格式，且包含上述所有字段。回复必须使用英文，不要使用中文或其他语言。
-"""
-
+    请仅输出一个 JSON，格式如下（所有文字内容必须使用中文，勿添加代码块或额外解释）:
+    {
+        "analysis": "你的详细分析，评估双方观点并指出最有说服力的论点",
+        "score": 0.5,
+        "reasoning": "简要说明为何给出该评分"
+    }
+    
+    其中 score 取值范围 [-1.0, 1.0]，负值代表偏空，正值代表偏多，0 为中性。务必返回合法 JSON。
+    """
+    
     # 调用 LLM 获取第三方观点
     llm_response = None
     llm_analysis = None
@@ -121,8 +121,11 @@ def debate_room_agent(state: AgentState):
     try:
         logger.info("开始调用 LLM 获取第三方分析...")
         messages = [
-            {"role": "system", "content": "You are a professional financial analyst. Please provide your analysis in English only, not in Chinese or any other language."},
-            {"role": "user", "content": llm_prompt}
+            {
+                "role": "system",
+                "content": "你是一名专业的金融分析师，请严格按照用户提示返回唯一的 JSON，所有说明均使用中文。",
+            },
+            {"role": "user", "content": llm_prompt},
         ]
 
         # 使用log_llm_interaction装饰器记录LLM交互

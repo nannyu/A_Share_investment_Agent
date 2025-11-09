@@ -248,6 +248,7 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
     all_summaries: Dict[str, Any] = {}
 
     if os.path.exists(output_file_path):
+        logger.info("📁 尝试加载宏观新闻缓存文件: %s", output_file_path)
         try:
             with open(output_file_path, "r", encoding="utf-8") as f:
                 all_summaries = json.load(f)
@@ -257,6 +258,7 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
                 cached_analysis = cached_entry.get("analysis")
                 invalid_cache = cached_status == "error" or not isinstance(cached_analysis, dict)
                 if invalid_cache:
+                    logger.warning("⚠️ 检测到无效宏观缓存（status=%s），准备重新生成", cached_status)
                     show_workflow_status(f"{agent_name}: 缓存中的 {today_str} 宏观摘要无效，尝试重新生成。")
                 else:
                     analysis_payload = {
@@ -267,6 +269,11 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
                     }
                     retrieved_news_count = analysis_payload.get("news_count", 0)
                     from_cache = True
+                    logger.info(
+                        "📦 宏观新闻使用缓存: %s (news=%d)",
+                        output_file_path,
+                        retrieved_news_count,
+                    )
                     show_workflow_status(f"{agent_name}: 从缓存加载 {today_str} 的宏观新闻总结。")
                     show_agent_reasoning(
                         analysis_payload,
@@ -274,12 +281,14 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
                     )
         except json.JSONDecodeError:
             all_summaries = {}
+            logger.error("❌ 宏观缓存 JSON 解码失败，忽略缓存文件。")
             show_agent_reasoning(
                 {"error": "macro_summary.json decode error"},
                 "Macro News Agent Cache",
             )
         except Exception as exc:
             all_summaries = {}
+            logger.exception("❌ 读取宏观缓存文件异常: %s", exc)
             show_agent_reasoning(
                 {"error": f"Failed to load macro summary cache: {exc}"},
                 "Macro News Agent Cache",
@@ -289,12 +298,15 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
 
     if not from_cache:
         try:
+            logger.info("📰 正在抓取指数新闻: %s", symbol)
             news_df = get_stock_news(symbol)
             if news_df is None or news_df.empty:
                 summary_failed = True
+                logger.warning("⚠️ 未获取到任何宏观新闻，使用默认摘要。")
                 analysis_payload = _default_macro_payload("未获取到相关宏观新闻数据。", 0, False, today_str)
             else:
                 retrieved_news_count = len(news_df)
+                logger.info("✅ 成功获取宏观新闻 %d 条", retrieved_news_count)
                 show_workflow_status(
                     f"{agent_name}: 成功获取 {retrieved_news_count} 条新闻")
                 for _, row in news_df.iterrows():
@@ -306,18 +318,21 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
                     })
                 news_json = _format_prompt_payload(news_items)
                 prompt_text = LLM_PROMPT_MACRO_ANALYSIS.replace("<<NEWS_JSON>>", news_json)
+                logger.info("🤖 调用 LLM 生成宏观摘要 (news=%d)", retrieved_news_count)
                 llm_response = get_chat_completion([
                     {"role": "user", "content": prompt_text}
                 ])
                 if not llm_response:
                     raise ValueError("LLM returned empty response for macro news analysis.")
                 analysis_payload = _payload_from_llm(llm_response, retrieved_news_count, False, today_str)
+                logger.info("✅ LLM 宏观摘要生成完成 (news=%d)", retrieved_news_count)
                 show_agent_reasoning(analysis_payload, "Macro News Agent (LLM)")
         except Exception as exc:
             summary_failed = True
             analysis_payload = _default_macro_payload(f"{ERROR_SUMMARY_TEXT}: {exc}", retrieved_news_count, False, today_str)
             logger.exception("Macro news agent failed during LLM workflow.")
             show_agent_reasoning({"error": str(exc)}, "Macro News Agent Error")
+            logger.warning("⚠️ 宏观新闻降级为默认摘要: %s", exc)
 
     if analysis_payload is None:
         analysis_payload = _default_macro_payload(DEFAULT_SUMMARY_TEXT, retrieved_news_count, from_cache, today_str)
@@ -341,6 +356,18 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
         with open(output_file_path, 'w', encoding='utf-8') as f:
             json.dump(all_summaries, f, ensure_ascii=False, indent=4)
         show_workflow_status(f"{agent_name}: 已将宏观总结保存至 {output_file_path}")
+        logger.info(
+            "💾 宏观摘要写入 %s（news=%d，status=%s）",
+            output_file_path,
+            entry["retrieved_news_count"],
+            entry["status"],
+        )
+    else:
+        logger.info(
+            "📦 宏观摘要直接复用缓存结果（signal=%s, confidence=%s）",
+            analysis_payload.get("signal"),
+            analysis_payload.get("confidence"),
+        )
 
     new_message = HumanMessage(
         content=json.dumps(analysis_payload, ensure_ascii=False),
@@ -362,6 +389,13 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
         "macro_news_summary_text": summary_text,
     }
 
+    logger.info(
+        "📊 宏观摘要完成: signal=%s score=%s news=%d cache=%s",
+        analysis_payload.get("signal"),
+        analysis_payload.get("score"),
+        analysis_payload.get("news_count"),
+        from_cache,
+    )
     show_workflow_status(f"{agent_name}: Execution finished.")
 
     return {

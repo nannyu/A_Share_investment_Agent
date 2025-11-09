@@ -1,8 +1,6 @@
 import sys
 import argparse
 import uuid  # Import uuid for run IDs
-import threading  # Import threading for background task
-import uvicorn  # Import uvicorn to run FastAPI
 
 from datetime import datetime, timedelta
 # Removed START as it's implicit with set_entry_point
@@ -31,10 +29,7 @@ from src.utils.output_logger import OutputLogger
 from src.tools.openrouter_config import get_chat_completion
 from src.utils.llm_interaction_logger import (
     log_agent_execution,
-    set_global_log_storage
 )
-from backend.dependencies import get_log_storage
-from backend.main import app as fastapi_app
 from src.utils.logging_config import setup_logger
 
 # --- Import Summary Report Generator ---
@@ -53,8 +48,6 @@ except ImportError:
     HAS_STRUCTURED_OUTPUT = False
 
 # --- Initialize Logging ---
-log_storage = get_log_storage()
-set_global_log_storage(log_storage)
 sys.stdout = OutputLogger()
 logger = setup_logger('main_workflow')
 
@@ -63,13 +56,6 @@ logger = setup_logger('main_workflow')
 
 def run_hedge_fund(run_id: str, ticker: str, start_date: str, end_date: str, portfolio: dict, show_reasoning: bool = False, num_of_news: int = 5, show_summary: bool = False):
     print(f"--- Starting Workflow Run ID: {run_id} ---")
-    try:
-        from backend.state import api_state
-        api_state.current_run_id = run_id
-        print(f"--- API State updated with Run ID: {run_id} ---")
-    except Exception as e:
-        print(f"Note: Could not update API state: {str(e)}")
-
     initial_state = {
         "messages": [],  # 初始消息为空
         "data": {
@@ -86,34 +72,16 @@ def run_hedge_fund(run_id: str, ticker: str, start_date: str, end_date: str, por
         }
     }
 
-    try:
-        from backend.utils.context_managers import workflow_run
-        with workflow_run(run_id):
-            final_state = app.invoke(initial_state)
-            print(f"--- Finished Workflow Run ID: {run_id} ---")
+    final_state = app.invoke(initial_state)
+    print(f"--- Finished Workflow Run ID: {run_id} ---")
 
-            if HAS_SUMMARY_REPORT and show_summary:
-                store_final_state(final_state)
-                enhanced_state = get_enhanced_final_state()
-                print_summary_report(enhanced_state)
+    if HAS_SUMMARY_REPORT and show_summary:
+        store_final_state(final_state)
+        enhanced_state = get_enhanced_final_state()
+        print_summary_report(enhanced_state)
 
-            if HAS_STRUCTURED_OUTPUT and show_reasoning:
-                print_structured_output(final_state)
-    except ImportError:
-        final_state = app.invoke(initial_state)
-        print(f"--- Finished Workflow Run ID: {run_id} ---")
-
-        if HAS_SUMMARY_REPORT and show_summary:
-            store_final_state(final_state)
-            enhanced_state = get_enhanced_final_state()
-            print_summary_report(enhanced_state)
-
-        if HAS_STRUCTURED_OUTPUT and show_reasoning:
-            print_structured_output(final_state)
-        try:
-            api_state.complete_run(run_id, "completed")
-        except Exception:
-            pass
+    if HAS_STRUCTURED_OUTPUT and show_reasoning:
+        print_structured_output(final_state)
     return final_state["messages"][-1].content
 
 
@@ -175,18 +143,8 @@ workflow.add_edge("portfolio_management_agent", END)
 
 app = workflow.compile()
 
-# --- FastAPI Background Task ---
-
-
-def run_fastapi():
-    print("--- Starting FastAPI server in background (port 8000) ---")
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=8000, log_config=None)
-
-
 # --- Main Execution Block ---
 if __name__ == "__main__":
-    fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
-    fastapi_thread.start()
     parser = argparse.ArgumentParser(
         description='Run the hedge fund trading system')
     parser.add_argument('--ticker', type=str, required=True,

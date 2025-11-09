@@ -66,7 +66,7 @@ def _parse_snapshot_response(raw: str) -> Dict[str, Any]:
             end = raw.rindex("}") + 1
             return json.loads(raw[start:end])
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to parse snapshot JSON: %s", exc)
+            logger.error("⚠️ Failed to parse snapshot JSON: %s", exc)
             return {}
 
 
@@ -140,11 +140,17 @@ def _sanitize_snapshot(data: Dict[str, Any]) -> Dict[str, float]:
 
 def _generate_snapshot(symbol: str) -> Dict[str, Any]:
     news_items = get_stock_news(symbol, max_news=20)
+    logger.info("🗞️ Snapshot news pool for %s: %d 条", symbol, len(news_items))
+    if not news_items:
+        logger.warning("⚠️ Snapshot prompt缺少新闻，将使用空模板: %s", symbol)
     messages = _build_prompt(symbol, news_items)
+    logger.info("🤖 正在调用 LLM 生成 %s 的市场快照...", symbol)
     llm_response = get_chat_completion(messages)
     snapshot_raw = _parse_snapshot_response(llm_response or "{}")
     sanitized = _sanitize_snapshot(snapshot_raw)
     sanitized.setdefault("summary", "")
+    if not sanitized["summary"]:
+        logger.warning("⚠️ LLM 返回内容缺少 summary，已使用空字符串: %s", symbol)
     sanitized["news_count"] = len(news_items)
     sanitized["generated_on"] = datetime.utcnow().isoformat()
     return sanitized

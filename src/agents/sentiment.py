@@ -24,7 +24,12 @@ def sentiment_agent(state: AgentState):
     end_date = data.get("end_date")
 
     news_list = get_stock_news(symbol, max_news=num_of_news, date=end_date)
-    logger.debug("Fetched %d news items (max=%d)", len(news_list), num_of_news)
+    logger.info(
+        "🗞️ 原始新闻 %d 条 (请求 %d) — %s",
+        len(news_list),
+        num_of_news,
+        symbol,
+    )
 
     cutoff_date = datetime.now() - timedelta(days=7)
     recent_news = []
@@ -50,40 +55,52 @@ def sentiment_agent(state: AgentState):
             len(recent_news),
             sentiment_score,
         )
+        logger.info(
+            "✅ Sentiment 得分 %.2f（使用 %d 条新闻）- %s",
+            sentiment_score,
+            len(recent_news),
+            symbol,
+        )
     except Exception as exc:  # noqa: BLE001
         sentiment_error = str(exc)
         logger.exception("Failed to compute news sentiment for %s: %s", symbol, exc)
+        logger.warning(
+            "⚠️ Sentiment 计算失败，准备使用 error 信号: %s | 错误=%s",
+            symbol,
+            sentiment_error,
+        )
 
     if sentiment_score is None:
         signal = "error"
         confidence = "0%"
         reasoning_text = (
-            f"Failed to compute sentiment score (news={len(recent_news)}). "
-            f"Error: {sentiment_error or 'unknown'}"
+            f"无法基于 {len(recent_news)} 条新闻得到情绪得分，错误信息：{sentiment_error or '未知'}"
         )
         sentiment_value = "error"
+        logger.error(
+            "❌ Sentiment agent fallback为 error（news=%d, symbol=%s）",
+            len(recent_news),
+            symbol,
+        )
     elif sentiment_score >= 0.5:
         signal = "bullish"
         confidence = f"{round(abs(sentiment_score) * 100)}%"
         reasoning_text = (
-            f"Based on {len(recent_news)} recent news articles, sentiment score: "
-            f"{sentiment_score:.2f}"
+            f"基于 {len(recent_news)} 条最新新闻，情绪得分 {sentiment_score:.2f}，整体偏多"
         )
         sentiment_value = sentiment_score
     elif sentiment_score <= -0.5:
         signal = "bearish"
         confidence = f"{round(abs(sentiment_score) * 100)}%"
         reasoning_text = (
-            f"Based on {len(recent_news)} recent news articles, sentiment score: "
-            f"{sentiment_score:.2f}"
+            f"基于 {len(recent_news)} 条最新新闻，情绪得分 {sentiment_score:.2f}，整体偏空"
         )
         sentiment_value = sentiment_score
     else:
         signal = "neutral"
         confidence = f"{round((1 - abs(sentiment_score)) * 100)}%"
         reasoning_text = (
-            f"Based on {len(recent_news)} recent news articles, sentiment score: "
-            f"{sentiment_score:.2f}"
+            f"基于 {len(recent_news)} 条最新新闻，情绪得分 {sentiment_score:.2f}，信号偏中性"
         )
         sentiment_value = sentiment_score
 
@@ -93,6 +110,12 @@ def sentiment_agent(state: AgentState):
         "reasoning": reasoning_text,
     }
     logger.debug("Sentiment agent output: %s", message_content)
+    logger.info(
+        "📣 Sentiment 结论 %s / %s — %s",
+        signal,
+        confidence,
+        symbol,
+    )
 
     if show_reasoning:
         show_agent_reasoning(message_content, "Sentiment Analysis Agent")

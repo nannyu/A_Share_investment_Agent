@@ -45,45 +45,45 @@ def researcher_bear_agent(state: AgentState):
     # Technical Analysis
     if technical_signals["signal"] == "bearish":
         bearish_points.append(
-            f"Technical indicators show bearish momentum with {technical_signals['confidence']} confidence")
+            f"技术指标偏空，置信度 {technical_signals['confidence']}")
         confidence_scores.append(
             float(str(technical_signals["confidence"]).replace("%", "")) / 100)
     else:
         bearish_points.append(
-            "Technical rally may be temporary, suggesting potential reversal")
+            "近期反弹或属技术性修复，存在再度回落的风险")
         confidence_scores.append(0.3)
 
     # Fundamental Analysis
     if fundamental_signals["signal"] == "bearish":
         bearish_points.append(
-            f"Concerning fundamentals with {fundamental_signals['confidence']} confidence")
+            f"基本面压力未消化，置信度 {fundamental_signals['confidence']}")
         confidence_scores.append(
             float(str(fundamental_signals["confidence"]).replace("%", "")) / 100)
     else:
         bearish_points.append(
-            "Current fundamental strength may not be sustainable")
+            "当前基本面优势或难长期维持")
         confidence_scores.append(0.3)
 
     # Sentiment Analysis
     if sentiment_signals["signal"] == "bearish":
         bearish_points.append(
-            f"Negative market sentiment with {sentiment_signals['confidence']} confidence")
+            f"市场情绪偏空，置信度 {sentiment_signals['confidence']}")
         confidence_scores.append(
             float(str(sentiment_signals["confidence"]).replace("%", "")) / 100)
     else:
         bearish_points.append(
-            "Market sentiment may be overly optimistic, indicating potential risks")
+            "市场情绪可能过度乐观，需警惕回撤")
         confidence_scores.append(0.3)
 
     # Valuation Analysis
     if valuation_signals["signal"] == "bearish":
         bearish_points.append(
-            f"Stock appears overvalued with {valuation_signals['confidence']} confidence")
+            f"估值偏高，置信度 {valuation_signals['confidence']}")
         confidence_scores.append(
             float(str(valuation_signals["confidence"]).replace("%", "")) / 100)
     else:
         bearish_points.append(
-            "Current valuation may not fully reflect downside risks")
+            "估值尚未充分计入下行风险")
         confidence_scores.append(0.3)
 
     # Calculate overall bearish confidence
@@ -93,7 +93,7 @@ def researcher_bear_agent(state: AgentState):
         "perspective": "bearish",
         "confidence": avg_confidence,
         "thesis_points": bearish_points,
-        "reasoning": "Bearish thesis based on comprehensive analysis of technical, fundamental, sentiment, and valuation factors"
+        "reasoning": "综合技术、基本面、情绪与估值因素，整体偏空，建议保持谨慎并关注潜在下行风险"
     }
 
     message = HumanMessage(

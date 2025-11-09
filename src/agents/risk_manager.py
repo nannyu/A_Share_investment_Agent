@@ -5,30 +5,47 @@ from langchain_core.messages import HumanMessage
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
 from src.tools.api import prices_to_df
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
+from src.utils.logging_config import setup_logger
 
 import json
 import ast
 
 ##### Risk Management Agent #####
+logger = setup_logger("risk_management_agent")
 
 
 @agent_endpoint("risk_management", "风险管理专家，评估投资风险并给出风险调整后的交易建议")
 def risk_management_agent(state: AgentState):
     """Responsible for risk management"""
     show_workflow_status("Risk Manager")
+    logger.info("🛡️ Risk Manager start for %s", data.get("ticker", "unknown"))
     show_reasoning = state["metadata"]["show_reasoning"]
     portfolio = state["data"]["portfolio"]
     data = state["data"]
 
     prices_df = prices_to_df(data["prices"])
+    if prices_df.empty:
+        logger.warning("⚠️ Price series为空，风险指标将退化为默认值")
 
     # Fetch debate room message instead of individual analyst messages
-    debate_message = next(
-        msg for msg in state["messages"] if msg.name == "debate_room_agent")
+    try:
+        debate_message = next(
+            msg for msg in state["messages"] if msg.name == "debate_room_agent")
+    except StopIteration:
+        logger.error("❌ 找不到 debate_room_agent 的结果，使用中性假设")
+        debate_message = HumanMessage(
+            content=json.dumps({
+                "signal": "neutral",
+                "confidence": 0.0,
+                "bull_confidence": 0.0,
+                "bear_confidence": 0.0,
+            }),
+            name="debate_room_agent",
+        )
 
     try:
         debate_results = json.loads(debate_message.content)
-    except Exception as e:
+    except Exception:
         debate_results = ast.literal_eval(debate_message.content)
 
     # 1. Calculate Risk Metrics
@@ -48,6 +65,14 @@ def risk_management_agent(state: AgentState):
     # 使用60天窗口计算最大回撤
     max_drawdown = (
         prices_df['close'] / prices_df['close'].rolling(window=60).max() - 1).min()
+
+    logger.info(
+        "📈 波动率=%.2f%%, VaR95=%.2f%%, MaxDD=%.2f%% (样本=%d)",
+        volatility * 100,
+        var_95 * 100,
+        max_drawdown * 100,
+        len(returns),
+    )
 
     # 2. Market Risk Assessment
     market_risk_score = 0
@@ -113,6 +138,14 @@ def risk_management_agent(state: AgentState):
     bull_confidence = debate_results["bull_confidence"]
     bear_confidence = debate_results["bear_confidence"]
     debate_confidence = debate_results["confidence"]
+    debate_signal = debate_results["signal"]
+    logger.info(
+        "🧮 Debate输入: signal=%s bull=%.2f bear=%.2f confidence=%.2f",
+        debate_signal,
+        bull_confidence,
+        bear_confidence,
+        debate_confidence,
+    )
 
     # Add to risk score if confidence is low or debate was close
     confidence_diff = abs(bull_confidence - bear_confidence)
@@ -126,8 +159,6 @@ def risk_management_agent(state: AgentState):
 
     # 6. Generate Trading Action
     # Consider debate room signal along with risk assessment
-    debate_signal = debate_results["signal"]
-
     if risk_score >= 9:
         trading_action = "hold"
     elif risk_score >= 7:
@@ -139,6 +170,14 @@ def risk_management_agent(state: AgentState):
             trading_action = "sell"
         else:
             trading_action = "hold"
+
+    logger.info(
+        "📊 风险评分=%d (市场=%d) -> 建议=%s, 最大仓位=%.2f",
+        risk_score,
+        market_risk_score,
+        trading_action,
+        float(max_position_size),
+    )
 
     message_content = {
         "max_position_size": float(max_position_size),
