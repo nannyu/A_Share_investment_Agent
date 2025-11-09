@@ -159,18 +159,18 @@ cp .env.example .env
 打开项目根目录下的 `.env` 文件, 填入您的 API key:
 
 ```env
-# Gemini API ����
+# Gemini API 配置
 GEMINI_API_KEY=your-gemini-api-key
 GEMINI_MODEL=gemini-1.5-flash
 
-# OpenAI Compatible API ���ã���ѡ��
+# OpenAI Compatible API 配置（可选）
 OPENAI_COMPATIBLE_API_KEY=your-openai-compatible-api-key
 OPENAI_COMPATIBLE_BASE_URL=https://your-api-endpoint.com/v1
 OPENAI_COMPATIBLE_MODEL=your-model-name
 
-# AkShare �����������ã���ѡ��
-# AKSHARE_PROXY_LIST ֧��用逗号或分号分隔，加 "direct" 表示尝试直连。
-# ��例：AKSHARE_PROXY_LIST=http://user:pass@proxy1:8080,http://user:pass@proxy2:8080,direct
+# AkShare 代理轮询配置（可选）
+# AKSHARE_PROXY_LIST 支持用逗号或分号分隔，加 "direct" 表示尝试直连。
+# 示例：AKSHARE_PROXY_LIST=http://user:pass@proxy1:8080,http://user:pass@proxy2:8080,direct
 AKSHARE_PROXY_LIST=direct
 AKSHARE_PROXY_MAX_ATTEMPTS=3
 AKSHARE_PROXY_BASE_DELAY=1
@@ -179,8 +179,8 @@ AKSHARE_PROXY_JITTER=0.5
 AKSHARE_PROXY_ALLOW_DIRECT=true
 ```
 
-# AkShare �����������ã���ѡ��
-# ��ʾ�� AKSHARE_PROXY_LIST=http://user:pass@proxy1:8080,http://user:pass@proxy2:8080,direct
+# AkShare 代理轮询配置（可选）
+# 例如：AKSHARE_PROXY_LIST=http://user:pass@proxy1:8080,http://user:pass@proxy2:8080,direct
 AKSHARE_PROXY_LIST=
 AKSHARE_PROXY_MAX_ATTEMPTS=3
 AKSHARE_PROXY_BASE_DELAY=1

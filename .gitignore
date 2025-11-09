@@ -25,7 +25,7 @@ AGENTS.md
 venv/
 ENV/
 .venv/
-
+.claude/
 # Environment Variables
 .env
 .env.local
@@ -55,8 +55,7 @@ ENV/
 reference/ 
 
 # Documentation
-docs/*
-!docs/database.md
+docs/
 structure.drawio
 
 # Generated cache/database
