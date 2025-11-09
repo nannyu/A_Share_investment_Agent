@@ -1,8 +1,33 @@
 from langchain_core.messages import HumanMessage
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
+from src.utils.logging_config import setup_logger
 import json
 import ast
+
+
+logger = setup_logger("researcher_bull_agent")
+
+
+def _load_agent_signals(state: AgentState, agent_name: str) -> dict:
+    """Fetch agent output if available, otherwise return neutral placeholder."""
+    for message in reversed(state["messages"]):
+        if message.name == agent_name:
+            payload = message.content
+            try:
+                return json.loads(payload)
+            except Exception:
+                try:
+                    return ast.literal_eval(payload)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to parse %s payload (%s), using neutral placeholder",
+                        agent_name,
+                        exc,
+                    )
+                    break
+    logger.warning("Missing %s output, falling back to neutral signal", agent_name)
+    return {"signal": "neutral", "confidence": "0%"}
 
 
 @agent_endpoint("researcher_bull", "多方研究员，从看多角度分析市场数据并提出投资论点")
@@ -11,26 +36,10 @@ def researcher_bull_agent(state: AgentState):
     show_workflow_status("Bullish Researcher")
     show_reasoning = state["metadata"]["show_reasoning"]
 
-    # Fetch messages from analysts
-    technical_message = next(
-        msg for msg in state["messages"] if msg.name == "technical_analyst_agent")
-    fundamentals_message = next(
-        msg for msg in state["messages"] if msg.name == "fundamentals_agent")
-    sentiment_message = next(
-        msg for msg in state["messages"] if msg.name == "sentiment_agent")
-    valuation_message = next(
-        msg for msg in state["messages"] if msg.name == "valuation_agent")
-
-    try:
-        fundamental_signals = json.loads(fundamentals_message.content)
-        technical_signals = json.loads(technical_message.content)
-        sentiment_signals = json.loads(sentiment_message.content)
-        valuation_signals = json.loads(valuation_message.content)
-    except Exception as e:
-        fundamental_signals = ast.literal_eval(fundamentals_message.content)
-        technical_signals = ast.literal_eval(technical_message.content)
-        sentiment_signals = ast.literal_eval(sentiment_message.content)
-        valuation_signals = ast.literal_eval(valuation_message.content)
+    technical_signals = _load_agent_signals(state, "technical_analyst_agent")
+    fundamental_signals = _load_agent_signals(state, "fundamentals_agent")
+    sentiment_signals = _load_agent_signals(state, "sentiment_agent")
+    valuation_signals = _load_agent_signals(state, "valuation_agent")
 
     # Analyze from bullish perspective
     bullish_points = []

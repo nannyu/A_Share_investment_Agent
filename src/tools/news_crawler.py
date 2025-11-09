@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 from datetime import datetime, timedelta
 import time
 import pandas as pd
@@ -171,7 +172,7 @@ def get_stock_news_via_akshare(symbol: str, max_news: int = 10) -> list:
                 print(f"转换新闻记录时出错: {err}")
                 continue
 
-        news_list.sort(key=lambda x: x["publish_time"], reverse=True)
+        news_list.sort(key=lambda x: x.get("publish_time", ""), reverse=True)
         return news_list[:max_news]
 
     except Exception as e:
@@ -343,6 +344,45 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
     return final_news_list
 
 
+def _parse_sentiment_score(raw_text: str) -> float:
+    """
+    Try multiple strategies to extract a numeric score from an LLM response.
+    """
+    if raw_text is None:
+        raise ValueError("LLM returned None when computing sentiment score")
+
+    text = str(raw_text).strip()
+    if not text:
+        raise ValueError("LLM returned empty response")
+
+    # Direct float string
+    try:
+        return float(text)
+    except ValueError:
+        pass
+
+    # JSON payload
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            for key in ("score", "sentiment", "sentiment_score", "value"):
+                if key in parsed:
+                    return float(parsed[key])
+        if isinstance(parsed, list) and parsed:
+            return float(parsed[0])
+        if isinstance(parsed, (int, float)):
+            return float(parsed)
+    except Exception:
+        # Ignore and fall back to regex parsing
+        pass
+
+    match = re.search(r"-?\d+(\.\d+)?", text.replace("%", " "))
+    if match:
+        return float(match.group())
+
+    raise ValueError(f"Unable to parse numeric sentiment score from response: {text[:160]}")
+
+
 def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
     """分析新闻情感得分
 
@@ -367,7 +407,7 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
 
     # 生成新闻内容的唯一标识
     news_key = "|".join([
-        f"{news['title']}|{news['content'][:100]}|{news['publish_time']}"
+        f"{news.get('title', '')}|{(news.get('content') or '')[:100]}|{news.get('publish_time', '')}"
         for news in news_list[:num_of_news]
     ])
 
@@ -418,10 +458,10 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
 
     # 准备新闻内容
     news_content = "\n\n".join([
-        f"标题：{news['title']}\n"
-        f"来源：{news['source']}\n"
-        f"时间：{news['publish_time']}\n"
-        f"内容：{news['content']}"
+        f"标题：{news.get('title', '未知')}\n"
+        f"来源：{news.get('source', '未知')}\n"
+        f"时间：{news.get('publish_time', '未知')}\n"
+        f"内容：{news.get('content', '')}"
         for news in news_list[:num_of_news]  # 使用指定数量的新闻
     ])
 
@@ -430,34 +470,37 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
         "content": f"请分析以下A股上市公司相关新闻的情感倾向：\n\n{news_content}\n\n请直接返回一个数字，范围是-1到1，无需解释。"
     }
 
-    try:
-        # 获取LLM分析结果
-        result = get_chat_completion([system_message, user_message])
-        if result is None:
-            print("Error: PI error occurred, LLM returned None")
-            return 0.0
+    try:
+        # 获取LLM响应
+        result = get_chat_completion([system_message, user_message])
+        if result is None:
+            print("Error: PI error occurred, LLM returned None")
+            return 0.0
+
+        preview = str(result)
+        print(f"[sentiment] Raw LLM response: {preview[:200]}")
+        try:
+            sentiment_score = _parse_sentiment_score(preview)
+        except ValueError as e:
+            print(f"Error parsing sentiment score: {e}")
+            return 0.0
+
+        print(f"[sentiment] Parsed score: {sentiment_score}")
+
+        # 确保在-1到1之间
+        sentiment_score = max(-1.0, min(1.0, sentiment_score))
+
+        # 写入缓存
+        cache[news_key] = sentiment_score
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error writing cache: {e}")
+
+        return sentiment_score
+
+    except Exception as e:
+        print(f"Error analyzing news sentiment: {e}")
+        return 0.0  # 发生异常时退回中性评分
 
-        # 提取数字结果
-        try:
-            sentiment_score = float(result.strip())
-        except ValueError as e:
-            print(f"Error parsing sentiment score: {e}")
-            print(f"Raw result: {result}")
-            return 0.0
-
-        # 确保分数在-1到1之间
-        sentiment_score = max(-1.0, min(1.0, sentiment_score))
-
-        # 缓存结果
-        cache[news_key] = sentiment_score
-        try:
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Error writing cache: {e}")
-
-        return sentiment_score
-
-    except Exception as e:
-        print(f"Error analyzing news sentiment: {e}")
-        return 0.0  # 出错时返回中性分数

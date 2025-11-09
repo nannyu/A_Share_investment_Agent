@@ -16,12 +16,13 @@ logger = setup_logger('portfolio_management_agent')
 # Helper function to get the latest message by agent name
 
 
-def get_latest_message_by_name(messages: list, name: str):
+def get_latest_message_by_name(messages: list, name: str, *, log_missing: bool = True):
     for msg in reversed(messages):
         if msg.name == name:
             return msg
-    logger.warning(
-        f"Message from agent '{name}' not found in portfolio_management_agent.")
+    if log_missing:
+        logger.warning(
+            f"Message from agent '{name}' not found in portfolio_management_agent.")
     # Return a dummy message object or raise an error, depending on desired handling
     # For now, returning a dummy message to avoid crashing, but content will be None.
     return HumanMessage(content=json.dumps({"signal": "error", "details": f"Message from {name} not found"}), name=name)
@@ -97,7 +98,7 @@ def portfolio_management_agent(state: AgentState):
     valuation_message = get_latest_message_by_name(
         cleaned_messages_for_processing, "valuation_agent")
     risk_message = get_latest_message_by_name(
-        cleaned_messages_for_processing, "risk_management_agent")
+        cleaned_messages_for_processing, "risk_management_agent", log_missing=False)
     tool_based_macro_message = get_latest_message_by_name(
         cleaned_messages_for_processing, "macro_analyst_agent")  # This is the main analysis path output
 
@@ -114,6 +115,15 @@ def portfolio_management_agent(state: AgentState):
         {"signal": "error", "details": "Risk message missing"})
     tool_based_macro_content = tool_based_macro_message.content if tool_based_macro_message else json.dumps(
         {"signal": "error", "details": "Tool-based Macro message missing"})
+
+    # Ensure risk management context is available even if the message wasn't present in the graph state.
+    if data.get("risk_analysis"):
+        try:
+            parsed_risk = json.loads(risk_content)
+        except Exception:
+            parsed_risk = None
+        if not parsed_risk or parsed_risk.get("details") == "Risk message missing":
+            risk_content = json.dumps(data["risk_analysis"])
 
     macro_news_payload = _normalize_macro_news_payload(
         data.get("macro_news_analysis_result"))

@@ -108,11 +108,13 @@ def get_macro_news_analysis(news_list: list) -> dict:
     os.makedirs(os.path.dirname(cache_file), exist_ok=True)
 
     # 生成新闻内容的唯一标识
-    news_key = "|".join([
-        f"{news['title']}|{news['publish_time']}"
-        for news in news_list[:20]  # 使用前20条新闻作为标识
-    ])
-
+    news_key_parts = []
+    for news in news_list[:20]:  # 使用前20条新闻作为标识
+        title = news.get("title", "")
+        publish_time = news.get("publish_time") or news.get("search_time") or ""
+        source = news.get("source", "")
+        news_key_parts.append(f"{title}|{publish_time}|{source}")
+    news_key = "|".join(news_key_parts)
     # 检查缓存
     if os.path.exists(cache_file):
         try:
@@ -155,14 +157,16 @@ def get_macro_news_analysis(news_list: list) -> dict:
     }
 
     # 准备新闻内容
-    news_content = "\n\n".join([
-        f"标题：{news['title']}\n"
-        f"来源：{news['source']}\n"
-        f"时间：{news['publish_time']}\n"
-        f"内容：{news['content']}"
-        # 使用前50条新闻进行分析，注意这里不是100，因为可能超过上下文限制，可根据自己的LLM来自行设置
-        for news in news_list[:50]
-    ])
+    # 准备用户输入内容，最多取前50条新闻构造上下文
+    news_content_blocks = []
+    for news in news_list[:50]:
+        news_content_blocks.append(
+            f"标题：{news.get('title', '未知')}\n"
+            f"来源：{news.get('source', '未知')}\n"
+            f"时间：{news.get('publish_time', news.get('search_time', '未知'))}\n"
+            f"内容：{news.get('content', '')}"
+        )
+    news_content = "\n\n".join(news_content_blocks)
 
     user_message = {
         "role": "user",

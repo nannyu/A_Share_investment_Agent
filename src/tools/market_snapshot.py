@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -69,34 +70,73 @@ def _parse_snapshot_response(raw: str) -> Dict[str, Any]:
             return {}
 
 
+
+
+def _parse_numeric(value: Any, default_multiplier: float | None = None) -> float:
+    """Parse snapshot numeric fields supporting 中文单位 (亿/万等)."""
+    if value in (None, ""):
+        return 0.0
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if default_multiplier and number < default_multiplier:
+            number *= default_multiplier
+        return number
+
+    text = str(value).strip()
+    if not text:
+        return 0.0
+
+    unit_tokens = [
+        ('万亿', 1e12),
+        ('亿股', 1e8),
+        ('亿手', 1e8),
+        ('亿', 1e8),
+        ('万股', 1e4),
+        ('万手', 1e4),
+        ('万', 1e4),
+    ]
+    multiplier = 1.0
+    unit_applied = False
+    for token, factor in unit_tokens:
+        if token in text:
+            text = text.replace(token, "")
+            multiplier = factor
+            unit_applied = True
+            break
+
+    cleaned = text.replace(",", "").replace(" ", "")
+    match = re.search(r"-?\d+(\.\d+)?", cleaned)
+    if not match:
+        return 0.0
+
+    number = float(match.group())
+    if not unit_applied and default_multiplier:
+        number *= default_multiplier
+    return number * multiplier
+
+
 def _sanitize_snapshot(data: Dict[str, Any]) -> Dict[str, float]:
-    def as_float(value: Any) -> float:
-        try:
-            cleaned = (
-                str(value)
-                .replace("亿", "e8")
-                .replace("万", "e4")
-                .replace(",", "")
-                .strip()
-            )
-            if cleaned.endswith("e8"):
-                return float(cleaned[:-2]) * 1e8
-            if cleaned.endswith("e4"):
-                return float(cleaned[:-2]) * 1e4
-            return float(cleaned)
-        except Exception:
-            return 0.0
+    market_cap = _parse_numeric(data.get("market_cap"), default_multiplier=1e8)
+    volume = _parse_numeric(data.get("volume"), default_multiplier=1e8)
+    average_volume = _parse_numeric(data.get("average_volume"), default_multiplier=1e8)
+    high = _parse_numeric(data.get("fifty_two_week_high"))
+    low = _parse_numeric(data.get("fifty_two_week_low"))
+
+    try:
+        confidence = float(data.get("confidence", 0) or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
 
     return {
-        "market_cap": as_float(data.get("market_cap")),
-        "volume": as_float(data.get("volume")),
-        "average_volume": as_float(data.get("average_volume")),
-        "fifty_two_week_high": as_float(data.get("fifty_two_week_high")),
-        "fifty_two_week_low": as_float(data.get("fifty_two_week_low")),
-        "confidence": float(data.get("confidence", 0)) if data.get("confidence") not in (None, "") else 0.0,
+        "market_cap": market_cap,
+        "volume": volume,
+        "average_volume": average_volume,
+        "fifty_two_week_high": high,
+        "fifty_two_week_low": low,
+        "confidence": confidence,
         "summary": str(data.get("summary", "")).strip(),
     }
-
 
 def _generate_snapshot(symbol: str) -> Dict[str, Any]:
     news_items = get_stock_news(symbol, max_news=20)
