@@ -160,13 +160,13 @@ def get_market_snapshot(symbol: str, ttl_seconds: int = SNAPSHOT_TTL_SECONDS) ->
     )
     if cached:
         record = _records_to_dict(cached[0])
-        logger.info("Market snapshot cache hit for %s", symbol)
+        logger.info("📦 Market snapshot cache hit for %s", symbol)
         return record
 
     snapshot = _generate_snapshot(symbol)
     record = {"symbol": symbol, **snapshot}
     cache.upsert_records(SNAPSHOT_TABLE, [record], key_columns=["symbol"])
-    logger.info("Market snapshot refreshed for %s", symbol)
+    logger.info("⚙️ Market snapshot refreshed for %s", symbol)
     return record
 
 

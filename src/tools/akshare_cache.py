@@ -35,12 +35,12 @@ cache = AkshareSQLiteCache(CACHE_PATH)
 
 
 def _log_cache_hit(label: str, symbol: str, rows: int) -> None:
-    logger.info("[cache] %s 命中，标的=%s，行数=%d", label, symbol, rows)
+    logger.info("📦 [cache] %s 命中，标的=%s，行数=%d", label, symbol, rows)
 
 
 def _log_cache_upsert(label: str, symbol: str, rows: int, extra: str = "") -> None:
-    suffix = f"，{extra}" if extra else ""
-    logger.info("[cache] %s 写入完成，标的=%s，新增/更新行数=%d%s", label, symbol, rows, suffix)
+    suffix = f"（{extra}" if extra else ""
+    logger.info("🆕 [cache] %s 写入完成，标的=%s，新增/更新行数=%d%s", label, symbol, rows, suffix)
 
 
 def _call_with_retry(func, label: str):

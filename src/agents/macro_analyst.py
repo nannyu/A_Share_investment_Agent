@@ -18,7 +18,7 @@ def macro_analyst_agent(state: AgentState):
     show_reasoning = state["metadata"]["show_reasoning"]
     data = state["data"]
     symbol = data["ticker"]
-    logger.info(f"正在进行宏观分析: {symbol}")
+    logger.info(f"🧠 正在进行宏观分析: {symbol}")
 
     # 获取 end_date 并传递给 get_stock_news
     end_date = data.get("end_date")  # 从 run_hedge_fund 传递来的 end_date
@@ -43,7 +43,7 @@ def macro_analyst_agent(state: AgentState):
             # 如果没有publish_time字段，默认包含这条新闻
             recent_news.append(news)
 
-    logger.info(f"获取到 {len(recent_news)} 条七天内的新闻")
+    logger.info(f"📰 获取到 {len(recent_news)} 条七天内的新闻")
 
     # 如果没有获取到新闻，返回默认结果
     if not recent_news:
