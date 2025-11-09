@@ -18,10 +18,10 @@ logger = setup_logger("risk_management_agent")
 def risk_management_agent(state: AgentState):
     """Responsible for risk management"""
     show_workflow_status("Risk Manager")
-    logger.info("🛡️ Risk Manager start for %s", data.get("ticker", "unknown"))
     show_reasoning = state["metadata"]["show_reasoning"]
-    portfolio = state["data"]["portfolio"]
     data = state["data"]
+    logger.info("🛡️ Risk Manager start for %s", data.get("ticker", "unknown"))
+    portfolio = data["portfolio"]
 
     prices_df = prices_to_df(data["prices"])
     if prices_df.empty:

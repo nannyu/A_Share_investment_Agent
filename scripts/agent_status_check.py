@@ -1,6 +1,10 @@
 import argparse
+import sys
 from datetime import datetime, timedelta
 from typing import Callable, Dict
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from langgraph.graph import END, StateGraph
 
