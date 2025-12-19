@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+# Usage:
+# uv run python src/backtester.py --ticker 002074 --start-date 2025-10-01 --end-date 2025-11-15
+#
+# Args:
+# --ticker           股票代码（6 位）
+# --start-date       回测开始日期 YYYY-MM-DD
+# --end-date         回测结束日期 YYYY-MM-DD
+# --num-of-news      每次调用工作流使用的新闻数量
+# --decision-interval 每 N 个交易日运行一次工作流
+# --plot             展示图表（可选，可能阻塞）
+# --save-plot         保存图表路径（可选，不填则保存至 logs/backtest_* 目录）
+# 配置项:
+# config.json -> backtest.force_run=true 时，禁用回测决策缓存并在日志目录后添加 _forceN
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import json
@@ -28,8 +42,10 @@ class BacktestConfig:
     ticker: str
     start_date: str
     end_date: str
+    initial_mode: str = "cash"  # cash | shares
     initial_capital: float = 100000.0
     initial_position: int = 0
+    force_run: bool = False
     num_of_news: int = 5
     decision_interval: int = 1  # run workflow every N business days
     plot: bool = False
@@ -45,7 +61,10 @@ class Backtester:
     ) -> None:
         self.config = config
         self.agent = agent
-        self.portfolio: Dict[str, Any] = {"cash": config.initial_capital, "stock": 0}
+        if config.initial_mode == "shares":
+            self.portfolio: Dict[str, Any] = {"cash": 0.0, "stock": 0}
+        else:
+            self.portfolio = {"cash": config.initial_capital, "stock": 0}
         self.portfolio_values: list[Dict[str, Any]] = []
         self._initial_position_applied = False
 
@@ -79,10 +98,18 @@ class Backtester:
         current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
         period = f"{self.config.start_date.replace('-', '')}_{self.config.end_date.replace('-', '')}"
         run_dir = os.path.join(log_root, f"backtest_{self.config.ticker}_{current_date}_{period}")
+        if self.config.force_run:
+            suffix = 1
+            candidate = f"{run_dir}_force{suffix}"
+            while os.path.exists(candidate):
+                suffix += 1
+                candidate = f"{run_dir}_force{suffix}"
+            run_dir = candidate
         os.makedirs(run_dir, exist_ok=True)
 
         self._backtest_run_dir = run_dir
         log_file = os.path.join(run_dir, "backtest.log")
+        self._decision_log_path = os.path.join(run_dir, "llm_decisions.json")
 
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(logging.INFO)
@@ -92,8 +119,10 @@ class Backtester:
         self.backtest_logger.info(f"回测开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self.backtest_logger.info(f"股票代码: {self.config.ticker}")
         self.backtest_logger.info(f"回测区间: {self.config.start_date} 至 {self.config.end_date}")
+        self.backtest_logger.info(f"初始模式: {self.config.initial_mode}")
         self.backtest_logger.info(f"初始资金: {self.config.initial_capital:,.2f}")
         self.backtest_logger.info(f"初始持仓: {self.config.initial_position} 股")
+        self.backtest_logger.info(f"强制运行: {self.config.force_run}")
         self.backtest_logger.info("模式: workflow")
         self.backtest_logger.info("-" * 100)
 
@@ -102,10 +131,18 @@ class Backtester:
         end = datetime.strptime(self.config.end_date, "%Y-%m-%d")
         if start >= end:
             raise ValueError("开始日期必须早于结束日期")
-        if self.config.initial_capital <= 0:
-            raise ValueError("初始资金必须大于 0")
-        if self.config.initial_position < 0:
-            raise ValueError("初始持仓不能为负数")
+        if self.config.initial_mode not in {"cash", "shares"}:
+            raise ValueError("初始模式必须为 cash 或 shares")
+        if self.config.initial_mode == "cash":
+            if self.config.initial_capital <= 0:
+                raise ValueError("初始资金必须大于 0")
+            if self.config.initial_position != 0:
+                raise ValueError("现金模式下初始持仓必须为 0")
+        if self.config.initial_mode == "shares":
+            if self.config.initial_position <= 0:
+                raise ValueError("股份模式下初始持仓必须大于 0")
+            if self.config.initial_capital != 0:
+                raise ValueError("股份模式下初始资金必须为 0")
         if not isinstance(self.config.ticker, str) or len(self.config.ticker) != 6:
             raise ValueError("无效的股票代码格式（应为 6 位字符串）")
         if self.agent is None:
@@ -140,18 +177,19 @@ class Backtester:
 
         cache = AkshareSQLiteCache(CACHE_PATH)
         cache_key = f"backtest_decision|{self.config.ticker}|{current_date}"
-        cached_rows = cache.fetch_records(
-            table="backtest_decision_cache",
-            filters={"cache_key": cache_key},
-            limit=1,
-        )
-        if cached_rows:
-            cached_val = cached_rows[0].get("result")
-            if cached_val:
-                try:
-                    return json.loads(cached_val)
-                except Exception:
-                    pass
+        if not self.config.force_run:
+            cached_rows = cache.fetch_records(
+                table="backtest_decision_cache",
+                filters={"cache_key": cache_key},
+                limit=1,
+            )
+            if cached_rows:
+                cached_val = cached_rows[0].get("result")
+                if cached_val:
+                    try:
+                        return json.loads(cached_val)
+                    except Exception:
+                        pass
 
         max_retries = 3
         for attempt in range(max_retries):
@@ -164,23 +202,44 @@ class Backtester:
                     portfolio=self.portfolio,
                     num_of_news=self.config.num_of_news,
                     run_id=f"backtest_{self.config.ticker}_{current_date.replace('-', '')}",
+                    return_state=True,
                 )
-                # run_hedge_fund 返回文本；这里做一个兼容包装，避免 backtester 崩溃
+                payload = {"decision": {"action": "hold", "quantity": 0}, "analyst_signals": {}}
                 if isinstance(result, dict):
-                    payload = result
+                    meta = result.get("metadata", {}) if isinstance(result, dict) else {}
+                    decision_details = meta.get("portfolio_management_agent_decision_details")
+                    if isinstance(decision_details, dict) and decision_details.get("action"):
+                        payload["decision"] = {
+                            "action": decision_details.get("action"),
+                            "quantity": decision_details.get("quantity", 0),
+                        }
+                    # fallback: parse last message JSON if present
+                    try:
+                        last_msg = result.get("messages", [])[-1]
+                        last_content = getattr(last_msg, "content", None)
+                        if last_content:
+                            parsed = json.loads(str(last_content))
+                            if isinstance(parsed, dict) and parsed.get("action"):
+                                payload["decision"] = {
+                                    "action": parsed.get("action"),
+                                    "quantity": parsed.get("quantity", 0),
+                                }
+                    except Exception:
+                        pass
                 else:
                     payload = {"decision": self._parse_decision_from_text(str(result)), "analyst_signals": {}}
 
-                cache.upsert_records(
-                    table="backtest_decision_cache",
-                    records=[
-                        {
-                            "cache_key": cache_key,
-                            "result": json.dumps(payload, ensure_ascii=False),
-                        }
-                    ],
-                    key_columns=["cache_key"],
-                )
+                if not self.config.force_run:
+                    cache.upsert_records(
+                        table="backtest_decision_cache",
+                        records=[
+                            {
+                                "cache_key": cache_key,
+                                "result": json.dumps(payload, ensure_ascii=False),
+                            }
+                        ],
+                        key_columns=["cache_key"],
+                    )
                 return payload
             except Exception as e:  # noqa: BLE001
                 self.logger.warning("获取智能体决策失败(尝试 %s/%s): %s", attempt + 1, max_retries, e)
@@ -193,10 +252,10 @@ class Backtester:
         decision = {"action": "hold", "quantity": 0}
         if "buy" in text or "bullish" in text:
             decision["action"] = "buy"
-            decision["quantity"] = 100
+            decision["quantity"] = 0
         elif "sell" in text or "bearish" in text:
             decision["action"] = "sell"
-            decision["quantity"] = 100
+            decision["quantity"] = 0
         return decision
 
     def _execute_trade(self, action: str, quantity: int, current_price: float) -> int:
@@ -229,6 +288,7 @@ class Backtester:
             return
 
         self.logger.info("开始回测: %s (workflow)", self.config.ticker)
+        llm_decision_log: list[Dict[str, Any]] = []
         print(
             f"{'日期':<12} {'代码':<6} {'操作':<6} {'数量':>8} {'价格':>10} "
             f"{'成交额':>12} {'现金变动':>12} {'现金':>12} {'持仓':>8} {'总值':>14} {'日收益%':>10}"
@@ -261,22 +321,37 @@ class Backtester:
                 prev_date = None
 
             if prev_price > 0:
-                max_affordable = int(self.portfolio["cash"] // prev_price)
-                target_qty = min(self.config.initial_position, max_affordable)
-                if target_qty > 0:
+                if self.config.initial_mode == "shares":
+                    target_qty = self.config.initial_position
                     self.portfolio["stock"] = target_qty
-                    self.portfolio["cash"] -= target_qty * prev_price
                     self._initial_position_applied = True
                     self.backtest_logger.info(
-                        "初始建仓: %s 股 @ %.2f (前一交易日: %s)",
+                        "初始建仓(持仓模式): %s 股 @ %.2f (前一交易日: %s)",
                         target_qty,
                         prev_price,
                         prev_date.strftime("%Y-%m-%d") if prev_date is not None else "未知",
                     )
                     print(
-                        f"初始建仓: {target_qty} 股 @ {prev_price:.2f} (前一交易日: "
+                        f"初始建仓(持仓模式): {target_qty} 股 @ {prev_price:.2f} (前一交易日: "
                         f"{prev_date.strftime('%Y-%m-%d') if prev_date is not None else '未知'})"
                     )
+                else:
+                    max_affordable = int(self.portfolio["cash"] // prev_price)
+                    target_qty = min(self.config.initial_position, max_affordable)
+                    if target_qty > 0:
+                        self.portfolio["stock"] = target_qty
+                        self.portfolio["cash"] -= target_qty * prev_price
+                        self._initial_position_applied = True
+                        self.backtest_logger.info(
+                            "初始建仓: %s 股 @ %.2f (前一交易日: %s)",
+                            target_qty,
+                            prev_price,
+                            prev_date.strftime("%Y-%m-%d") if prev_date is not None else "未知",
+                        )
+                        print(
+                            f"初始建仓: {target_qty} 股 @ {prev_price:.2f} (前一交易日: "
+                            f"{prev_date.strftime('%Y-%m-%d') if prev_date is not None else '未知'})"
+                        )
             else:
                 self.backtest_logger.warning("初始建仓失败: 未找到前一交易日收盘价")
                 print("初始建仓失败: 未找到前一交易日收盘价")
@@ -296,6 +371,14 @@ class Backtester:
                 lookback_start = (current_date - timedelta(days=30)).strftime("%Y-%m-%d")
                 output = self._get_agent_decision(current_date_str, lookback_start)
                 last_decision = output.get("decision", last_decision) or last_decision
+                llm_decision_log.append(
+                    {
+                        "date": current_date_str,
+                        "ticker": self.config.ticker,
+                        "decision": dict(last_decision),
+                        "response": output,
+                    }
+                )
             action = str(last_decision.get("action", "hold") or "hold")
             quantity = int(last_decision.get("quantity", 0) or 0)
 
@@ -304,15 +387,16 @@ class Backtester:
                 self.backtest_logger.info("\n各智能体分析结果:")
                 for agent_name, signal in output["analyst_signals"].items():
                     self.backtest_logger.info(f"\n{agent_name}: {signal}")
+            requested_qty = quantity
             self.backtest_logger.info(f"行动: {action.upper()}")
-            self.backtest_logger.info(f"数量: {quantity}")
+            self.backtest_logger.info(f"请求数量: {requested_qty}")
             self.backtest_logger.info(
                 "持仓: %s 股, 现金: %.2f",
                 int(self.portfolio["stock"]),
                 float(self.portfolio["cash"]),
             )
 
-            executed_qty = self._execute_trade(action, quantity, current_price)
+            executed_qty = self._execute_trade(action, requested_qty, current_price)
             trade_amount = executed_qty * current_price
             cash_change = 0.0
             if action == "buy":
@@ -320,6 +404,7 @@ class Backtester:
             elif action == "sell":
                 cash_change = trade_amount
 
+            self.backtest_logger.info("实际成交数量: %s", executed_qty)
             total_value = float(self.portfolio["cash"]) + float(self.portfolio["stock"]) * current_price
             self.portfolio["portfolio_value"] = total_value
 
@@ -349,6 +434,13 @@ class Backtester:
             self.portfolio_values.append(
                 {"Date": current_date, "Portfolio Value": total_value, "Daily Return": daily_return}
             )
+
+        if llm_decision_log:
+            try:
+                with open(self._decision_log_path, "w", encoding="utf-8") as f:
+                    json.dump(llm_decision_log, f, ensure_ascii=False, indent=2)
+            except Exception as exc:  # noqa: BLE001
+                self.backtest_logger.warning("写入 LLM 决策 JSON 失败: %s", exc)
 
     def analyze_performance(self) -> pd.DataFrame:
         performance_df = pd.DataFrame(self.portfolio_values).set_index("Date")
@@ -417,6 +509,16 @@ class Backtester:
 def _parse_args() -> BacktestConfig:
     import argparse
 
+    def _load_backtest_config_json() -> Dict[str, Any]:
+        config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json"))
+        if not os.path.exists(config_path):
+            return {}
+        try:
+            with open(config_path, "r", encoding="utf-8") as handle:
+                return json.load(handle) or {}
+        except Exception:
+            return {}
+
     parser = argparse.ArgumentParser(description="运行回测模拟")
     parser.add_argument("--ticker", type=str, required=True, help="股票代码 (例如: 600519)")
     parser.add_argument(
@@ -432,12 +534,7 @@ def _parse_args() -> BacktestConfig:
         help="开始日期 YYYY-MM-DD（默认 90 天前）",
     )
     parser.add_argument("--initial-capital", type=float, default=100000.0, help="初始资金 (默认: 100000)")
-    parser.add_argument(
-        "--initial-position",
-        type=int,
-        default=None,
-        help="初始持仓股数（不传则运行时询问）",
-    )
+    parser.add_argument("--initial-position", type=int, default=0, help="初始持仓股数（默认 0）")
     parser.add_argument("--num-of-news", type=int, default=5, help="每次调用工作流使用的新闻数量 (默认: 5)")
     parser.add_argument(
         "--decision-interval",
@@ -453,20 +550,28 @@ def _parse_args() -> BacktestConfig:
     if save_plot_path and not os.path.isabs(save_plot_path):
         save_plot_path = os.path.join(os.getcwd(), save_plot_path)
 
-    initial_position = args.initial_position
-    if initial_position is None:
-        try:
-            raw = input("请输入回测初始持仓股数（默认 0）：").strip()
-            initial_position = int(raw) if raw else 0
-        except Exception:
-            initial_position = 0
+    config_payload = _load_backtest_config_json()
+    backtest_cfg = config_payload.get("backtest", {}) if isinstance(config_payload, dict) else {}
+    initial_mode = str(backtest_cfg.get("initial_mode", "")).strip().lower()
+    if initial_mode not in {"cash", "shares"}:
+        initial_mode = "cash"
+    force_run = bool(backtest_cfg.get("force_run", False))
+
+    if initial_mode == "shares":
+        initial_position = int(backtest_cfg.get("initial_shares", 0) or 0)
+        initial_capital = 0.0
+    else:
+        initial_position = 0
+        initial_capital = float(backtest_cfg.get("initial_cash", args.initial_capital) or 0.0)
 
     return BacktestConfig(
         ticker=args.ticker,
         start_date=args.start_date,
         end_date=args.end_date,
-        initial_capital=args.initial_capital,
+        initial_mode=initial_mode,
+        initial_capital=float(initial_capital),
         initial_position=int(initial_position or 0),
+        force_run=force_run,
         num_of_news=args.num_of_news,
         decision_interval=args.decision_interval,
         plot=bool(args.plot),

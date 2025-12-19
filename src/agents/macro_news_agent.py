@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from langchain_core.messages import HumanMessage
 
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
-from src.tools.akshare_cache import get_stock_news
+from src.tools.news_crawler import get_stock_news
 from src.tools.openrouter_config import get_chat_completion
 from src.utils.api_utils import agent_endpoint
 from src.utils.logging_config import setup_logger
@@ -300,23 +300,40 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
         try:
             logger.info("📰 正在抓取指数新闻: %s", symbol)
             today_str = datetime.now().strftime("%Y-%m-%d")
-            news_df = get_stock_news(symbol, date=today_str)
-            if news_df is None or news_df.empty:
+            news_raw = get_stock_news(symbol, max_news=100, date=today_str)
+            if not news_raw:
                 summary_failed = True
-                logger.warning("⚠️ 未获取到任何宏观新闻，使用默认摘要。")
+                logger.warning("?? 未获取到任何宏观新闻，使用默认摘要。")
                 analysis_payload = _default_macro_payload("未获取到相关宏观新闻数据。", 0, False, today_str)
             else:
-                retrieved_news_count = len(news_df)
-                logger.info("✅ 成功获取宏观新闻 %d 条", retrieved_news_count)
-                show_workflow_status(
-                    f"{agent_name}: 成功获取 {retrieved_news_count} 条新闻")
-                for _, row in news_df.iterrows():
-                    row_dict = row.to_dict()
-                    news_items.append({
-                        "title": str(row_dict.get("新闻标题") or row_dict.get("title") or "").strip(),
-                        "content": str(row_dict.get("新闻内容") or row_dict.get("content") or "").strip(),
-                        "publish_time": str(row_dict.get("发布时间") or row_dict.get("publish_time") or "").strip(),
-                    })
+                if isinstance(news_raw, list):
+                    retrieved_news_count = len(news_raw)
+                    logger.info("? 成功获取宏观新闻 %d 条", retrieved_news_count)
+                    show_workflow_status(f"{agent_name}: 成功获取 {retrieved_news_count} 条新闻")
+                    for item in news_raw:
+                        news_items.append({
+                            "title": str(item.get("title") or "").strip(),
+                            "content": str(item.get("content") or item.get("title") or "").strip(),
+                            "publish_time": str(item.get("publish_time") or item.get("search_time") or "").strip(),
+                        })
+                else:
+                    news_df = news_raw
+                    if news_df is None or getattr(news_df, "empty", False):
+                        summary_failed = True
+                        logger.warning("?? 未获取到任何宏观新闻，使用默认摘要。")
+                        analysis_payload = _default_macro_payload("未获取到相关宏观新闻数据。", 0, False, today_str)
+                    else:
+                        retrieved_news_count = len(news_df)
+                        logger.info("? 成功获取宏观新闻 %d 条", retrieved_news_count)
+                        show_workflow_status(
+                            f"{agent_name}: 成功获取 {retrieved_news_count} 条新闻")
+                        for _, row in news_df.iterrows():
+                            row_dict = row.to_dict()
+                            news_items.append({
+                                "title": str(row_dict.get("新闻标题") or row_dict.get("title") or "").strip(),
+                                "content": str(row_dict.get("新闻内容") or row_dict.get("content") or "").strip(),
+                                "publish_time": str(row_dict.get("发布时间") or row_dict.get("publish_time") or "").strip(),
+                            })
                 news_json = _format_prompt_payload(news_items)
                 prompt_text = LLM_PROMPT_MACRO_ANALYSIS.replace("<<NEWS_JSON>>", news_json)
                 logger.info("🤖 调用 LLM 生成宏观摘要 (news=%d)", retrieved_news_count)
