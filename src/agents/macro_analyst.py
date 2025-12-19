@@ -6,6 +6,8 @@ from src.utils.api_utils import agent_endpoint, log_llm_interaction
 import json
 from datetime import datetime, timedelta
 from src.tools.openrouter_config import get_chat_completion
+from src.database import AkshareSQLiteCache
+from src.tools.akshare_cache import CACHE_PATH
 
 # 设置日志记录
 logger = setup_logger('macro_analyst_agent')
@@ -108,32 +110,28 @@ def get_macro_news_analysis(news_list: list, *, symbol: str | None = None, cache
             "reasoning": "没有足够的新闻数据进行宏观分析"
         }
 
-    # 检查缓存
-    import os
-    cache_file = os.getenv("MACRO_ANALYSIS_CACHE_PATH", "src/data/macro_analysis_cache.json")
-    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-
     # 缓存 Key 规则（按“股票 + 日期 + v2”）：不要用新闻内容作为 key
     if not cache_date:
         cache_date = datetime.now().strftime("%Y-%m-%d")
     if symbol:
-        news_key = f"{symbol}|{cache_date}|v2"
+        cache_key = f"macro_analysis|{symbol}|{cache_date}"
     else:
-        news_key = f"{cache_date}|v2"
-    # 检查缓存
-    if os.path.exists(cache_file):
-        try:
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                cache = json.load(f)
-                if news_key in cache:
-                    logger.info("📦 使用缓存的宏观分析结果")
-                    return cache[news_key]
-        except Exception as e:
-            logger.error(f"⚠️ 读取宏观分析缓存出错: {e}")
-            cache = {}
-    else:
-        logger.info("📄 未找到宏观分析缓存文件，将创建新文件")
-        cache = {}
+        cache_key = f"macro_analysis|{cache_date}"
+
+    cache = AkshareSQLiteCache(CACHE_PATH)
+    cached_rows = cache.fetch_records(
+        table="llm_result_cache",
+        filters={"cache_key": cache_key},
+        limit=1,
+    )
+    if cached_rows:
+        cached_val = cached_rows[0].get("result")
+        if cached_val:
+            try:
+                logger.info("📦 使用缓存的宏观分析结果")
+                return json.loads(cached_val)
+            except Exception:
+                pass
 
     # 准备系统消息
     system_message = {
@@ -224,13 +222,18 @@ def get_macro_news_analysis(news_list: list, *, symbol: str | None = None, cache
                 }
 
         # 缓存结果
-        cache[news_key] = analysis_result
-        try:
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-            logger.info("💾 宏观分析结果已缓存")
-        except Exception as e:
-            logger.error(f"⚠️ 写入宏观分析缓存出错: {e}")
+        cache.upsert_records(
+            table="llm_result_cache",
+            records=[
+                {
+                    "cache_key": cache_key,
+                    "cache_type": "macro_analysis",
+                    "result": json.dumps(analysis_result, ensure_ascii=False),
+                }
+            ],
+            key_columns=["cache_key"],
+        )
+        logger.info("💾 宏观分析结果已缓存")
 
         return analysis_result
 

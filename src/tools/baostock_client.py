@@ -96,6 +96,17 @@ def query_history_k_data_plus(
         frequency="d",
         adjustflag=adjust_flag,
     )
+    if rs.error_code == "10001001":  # not logged in
+        _logout()
+        ensure_login()
+        rs = bs.query_history_k_data_plus(
+            bs_symbol,
+            fields,
+            start_date=start,
+            end_date=end,
+            frequency="d",
+            adjustflag=adjust_flag,
+        )
     if rs.error_code != "0":
         raise RuntimeError(f"BaoStock query failed[{rs.error_code}]: {rs.error_msg}")
 
@@ -112,6 +123,10 @@ def query_trade_dates(start_date, end_date) -> pd.DataFrame:
     start = _coerce_dates(start_date)
     end = _coerce_dates(end_date)
     rs = bs.query_trade_dates(start_date=start, end_date=end)
+    if rs.error_code == "10001001":  # not logged in
+        _logout()
+        ensure_login()
+        rs = bs.query_trade_dates(start_date=start, end_date=end)
     if rs.error_code != "0":
         raise RuntimeError(f"BaoStock trade date query failed[{rs.error_code}]: {rs.error_msg}")
     rows: List[List[str]] = []

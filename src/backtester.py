@@ -2,15 +2,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import json
 import logging
 import os
 import time
 from typing import Any, Callable, Dict, Optional
+import sys
 
 import pandas as pd
 
 from src.tools.api import get_price_data
+from src.database import AkshareSQLiteCache
+from src.tools.akshare_cache import CACHE_PATH
 
+
+# 统一控制台编码，避免 Windows 下 emoji/中文导致的 gbk 编码异常
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 @dataclass(frozen=True)
 class BacktestConfig:
@@ -18,9 +29,9 @@ class BacktestConfig:
     start_date: str
     end_date: str
     initial_capital: float = 100000.0
+    initial_position: int = 0
     num_of_news: int = 5
-    mode: str = "technical"  # "technical" | "workflow"
-    decision_interval: int = 5  # only for workflow mode
+    decision_interval: int = 1  # run workflow every N business days
     plot: bool = False
     save_plot_path: str | None = None
 
@@ -36,6 +47,7 @@ class Backtester:
         self.agent = agent
         self.portfolio: Dict[str, Any] = {"cash": config.initial_capital, "stock": 0}
         self.portfolio_values: list[Dict[str, Any]] = []
+        self._initial_position_applied = False
 
         self._api_call_count = 0
         self._api_window_start = time.time()
@@ -56,17 +68,21 @@ class Backtester:
         return logger
 
     def _setup_backtest_logging(self) -> None:
-        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
-        os.makedirs(log_dir, exist_ok=True)
+        log_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+        os.makedirs(log_root, exist_ok=True)
 
         self.backtest_logger = logging.getLogger("backtest")
         self.backtest_logger.setLevel(logging.INFO)
         if self.backtest_logger.handlers:
             self.backtest_logger.handlers.clear()
 
-        current_date = datetime.now().strftime("%Y%m%d")
+        current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
         period = f"{self.config.start_date.replace('-', '')}_{self.config.end_date.replace('-', '')}"
-        log_file = os.path.join(log_dir, f"backtest_{self.config.ticker}_{current_date}_{period}.log")
+        run_dir = os.path.join(log_root, f"backtest_{self.config.ticker}_{current_date}_{period}")
+        os.makedirs(run_dir, exist_ok=True)
+
+        self._backtest_run_dir = run_dir
+        log_file = os.path.join(run_dir, "backtest.log")
 
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(logging.INFO)
@@ -77,7 +93,8 @@ class Backtester:
         self.backtest_logger.info(f"股票代码: {self.config.ticker}")
         self.backtest_logger.info(f"回测区间: {self.config.start_date} 至 {self.config.end_date}")
         self.backtest_logger.info(f"初始资金: {self.config.initial_capital:,.2f}")
-        self.backtest_logger.info(f"模式: {self.config.mode}")
+        self.backtest_logger.info(f"初始持仓: {self.config.initial_position} 股")
+        self.backtest_logger.info("模式: workflow")
         self.backtest_logger.info("-" * 100)
 
     def _validate_inputs(self) -> None:
@@ -87,11 +104,11 @@ class Backtester:
             raise ValueError("开始日期必须早于结束日期")
         if self.config.initial_capital <= 0:
             raise ValueError("初始资金必须大于 0")
+        if self.config.initial_position < 0:
+            raise ValueError("初始持仓不能为负数")
         if not isinstance(self.config.ticker, str) or len(self.config.ticker) != 6:
             raise ValueError("无效的股票代码格式（应为 6 位字符串）")
-        if self.config.mode not in {"technical", "workflow"}:
-            raise ValueError("mode must be one of: technical, workflow")
-        if self.config.mode == "workflow" and self.agent is None:
+        if self.agent is None:
             raise ValueError("workflow mode requires agent (e.g. run_hedge_fund)")
 
     def _rate_limit(self) -> None:
@@ -121,6 +138,21 @@ class Backtester:
         if self.agent is None:
             return {"decision": {"action": "hold", "quantity": 0}, "analyst_signals": {}}
 
+        cache = AkshareSQLiteCache(CACHE_PATH)
+        cache_key = f"backtest_decision|{self.config.ticker}|{current_date}"
+        cached_rows = cache.fetch_records(
+            table="backtest_decision_cache",
+            filters={"cache_key": cache_key},
+            limit=1,
+        )
+        if cached_rows:
+            cached_val = cached_rows[0].get("result")
+            if cached_val:
+                try:
+                    return json.loads(cached_val)
+                except Exception:
+                    pass
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -135,8 +167,21 @@ class Backtester:
                 )
                 # run_hedge_fund 返回文本；这里做一个兼容包装，避免 backtester 崩溃
                 if isinstance(result, dict):
-                    return result
-                return {"decision": self._parse_decision_from_text(str(result)), "analyst_signals": {}}
+                    payload = result
+                else:
+                    payload = {"decision": self._parse_decision_from_text(str(result)), "analyst_signals": {}}
+
+                cache.upsert_records(
+                    table="backtest_decision_cache",
+                    records=[
+                        {
+                            "cache_key": cache_key,
+                            "result": json.dumps(payload, ensure_ascii=False),
+                        }
+                    ],
+                    key_columns=["cache_key"],
+                )
+                return payload
             except Exception as e:  # noqa: BLE001
                 self.logger.warning("获取智能体决策失败(尝试 %s/%s): %s", attempt + 1, max_retries, e)
                 time.sleep(2**attempt)
@@ -183,12 +228,12 @@ class Backtester:
             self.logger.warning("No business days in range, nothing to backtest.")
             return
 
-        self.logger.info("开始回测: %s (%s)", self.config.ticker, self.config.mode)
+        self.logger.info("开始回测: %s (workflow)", self.config.ticker)
         print(
             f"{'日期':<12} {'代码':<6} {'操作':<6} {'数量':>8} {'价格':>10} "
-            f"{'现金':>12} {'持仓':>8} {'总值':>14} {'日收益%':>10}"
+            f"{'成交额':>12} {'现金变动':>12} {'现金':>12} {'持仓':>8} {'总值':>14} {'日收益%':>10}"
         )
-        print("-" * 100)
+        print("-" * 120)
 
         prefetch_start = (dates[0] - timedelta(days=200)).strftime("%Y-%m-%d")
         prefetch_end = dates[-1].strftime("%Y-%m-%d")
@@ -203,6 +248,39 @@ class Backtester:
 
         last_decision: Dict[str, Any] = {"action": "hold", "quantity": 0}
 
+        # 用前一交易日收盘价进行初始建仓（如果配置了初始持仓）
+        if self.config.initial_position > 0 and not self._initial_position_applied:
+            first_trade_date = pd.to_datetime(dates[0])
+            prev_rows = price_df.loc[price_df["date"] < first_trade_date]
+            if not prev_rows.empty:
+                prev_row = prev_rows.iloc[-1]
+                prev_price = float(prev_row.get("close", 0.0) or 0.0)
+                prev_date = prev_row.get("date")
+            else:
+                prev_price = 0.0
+                prev_date = None
+
+            if prev_price > 0:
+                max_affordable = int(self.portfolio["cash"] // prev_price)
+                target_qty = min(self.config.initial_position, max_affordable)
+                if target_qty > 0:
+                    self.portfolio["stock"] = target_qty
+                    self.portfolio["cash"] -= target_qty * prev_price
+                    self._initial_position_applied = True
+                    self.backtest_logger.info(
+                        "初始建仓: %s 股 @ %.2f (前一交易日: %s)",
+                        target_qty,
+                        prev_price,
+                        prev_date.strftime("%Y-%m-%d") if prev_date is not None else "未知",
+                    )
+                    print(
+                        f"初始建仓: {target_qty} 股 @ {prev_price:.2f} (前一交易日: "
+                        f"{prev_date.strftime('%Y-%m-%d') if prev_date is not None else '未知'})"
+                    )
+            else:
+                self.backtest_logger.warning("初始建仓失败: 未找到前一交易日收盘价")
+                print("初始建仓失败: 未找到前一交易日收盘价")
+
         for idx, current_date in enumerate(dates):
             current_date_str = current_date.strftime("%Y-%m-%d")
             day_rows = price_df.loc[price_df["date"] == pd.to_datetime(current_date_str)]
@@ -214,35 +292,33 @@ class Backtester:
             quantity = 0
             output: Dict[str, Any] = {}
 
-            if self.config.mode == "technical":
-                hist = price_df.loc[price_df["date"] <= pd.to_datetime(current_date_str)]
-                close_series = pd.to_numeric(hist.get("close"), errors="coerce").dropna()
-                if len(close_series) >= 20:
-                    ma20 = float(close_series.tail(20).mean())
-                    last_close = float(close_series.iloc[-1])
-                    if last_close > ma20 and self.portfolio["stock"] == 0:
-                        action = "buy"
-                        quantity = 100
-                    elif last_close < ma20 and self.portfolio["stock"] > 0:
-                        action = "sell"
-                        quantity = int(self.portfolio["stock"])
-            else:
-                if idx % max(1, int(self.config.decision_interval)) == 0:
-                    lookback_start = (current_date - timedelta(days=30)).strftime("%Y-%m-%d")
-                    output = self._get_agent_decision(current_date_str, lookback_start)
-                    last_decision = output.get("decision", last_decision) or last_decision
-                action = str(last_decision.get("action", "hold") or "hold")
-                quantity = int(last_decision.get("quantity", 0) or 0)
+            if idx % max(1, int(self.config.decision_interval)) == 0:
+                lookback_start = (current_date - timedelta(days=30)).strftime("%Y-%m-%d")
+                output = self._get_agent_decision(current_date_str, lookback_start)
+                last_decision = output.get("decision", last_decision) or last_decision
+            action = str(last_decision.get("action", "hold") or "hold")
+            quantity = int(last_decision.get("quantity", 0) or 0)
 
             self.backtest_logger.info(f"\n交易日期: {current_date_str}")
-            if self.config.mode == "workflow" and output.get("analyst_signals"):
+            if output.get("analyst_signals"):
                 self.backtest_logger.info("\n各智能体分析结果:")
                 for agent_name, signal in output["analyst_signals"].items():
                     self.backtest_logger.info(f"\n{agent_name}: {signal}")
             self.backtest_logger.info(f"行动: {action.upper()}")
             self.backtest_logger.info(f"数量: {quantity}")
+            self.backtest_logger.info(
+                "持仓: %s 股, 现金: %.2f",
+                int(self.portfolio["stock"]),
+                float(self.portfolio["cash"]),
+            )
 
             executed_qty = self._execute_trade(action, quantity, current_price)
+            trade_amount = executed_qty * current_price
+            cash_change = 0.0
+            if action == "buy":
+                cash_change = -trade_amount
+            elif action == "sell":
+                cash_change = trade_amount
 
             total_value = float(self.portfolio["cash"]) + float(self.portfolio["stock"]) * current_price
             self.portfolio["portfolio_value"] = total_value
@@ -252,9 +328,21 @@ class Backtester:
             else:
                 daily_return = 0.0
 
+            self.backtest_logger.info(
+                "交易明细: action=%s qty=%s price=%.2f amount=%.2f cash_change=%.2f cash=%.2f stock=%s",
+                action,
+                executed_qty,
+                current_price,
+                trade_amount,
+                cash_change,
+                float(self.portfolio["cash"]),
+                int(self.portfolio["stock"]),
+            )
+
             print(
                 f"{current_date_str:<12} {self.config.ticker:<6} {action:<6} {executed_qty:>8} "
-                f"{current_price:>10.2f} {self.portfolio['cash']:>12.2f} {self.portfolio['stock']:>8} "
+                f"{current_price:>10.2f} {trade_amount:>12.2f} {cash_change:>12.2f} "
+                f"{self.portfolio['cash']:>12.2f} {int(self.portfolio['stock']):>8} "
                 f"{total_value:>14.2f} {daily_return:>10.2f}"
             )
 
@@ -283,9 +371,12 @@ class Backtester:
         self.backtest_logger.info(f"初始资金: {self.config.initial_capital:,.2f}")
         self.backtest_logger.info(f"最终总值: {self.portfolio.get('portfolio_value', 0):,.2f}")
         self.backtest_logger.info(f"总收益率: {total_return * 100:.2f}%")
+        self.backtest_logger.info(f"最终持仓: {int(self.portfolio.get('stock', 0))} 股")
+        self.backtest_logger.info(f"期末现金: {float(self.portfolio.get('cash', 0.0)):.2f}")
 
         # 可选绘图：默认不 show（避免无 GUI 环境卡死）
-        if self.config.plot or self.config.save_plot_path:
+        # 默认保存图表到回测日志目录；仅在 plot=True 时弹窗展示
+        if True:
             try:
                 import matplotlib
                 import matplotlib.pyplot as plt
@@ -308,10 +399,12 @@ class Backtester:
                 ax2.grid(True)
                 plt.tight_layout()
 
-                if self.config.save_plot_path:
-                    os.makedirs(os.path.dirname(self.config.save_plot_path), exist_ok=True)
-                    plt.savefig(self.config.save_plot_path, dpi=150)
-                    self.logger.info("Saved backtest plot to %s", self.config.save_plot_path)
+                save_path = self.config.save_plot_path or os.path.join(
+                    self._backtest_run_dir, "backtest_plot.png"
+                )
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                plt.savefig(save_path, dpi=150)
+                self.logger.info("Saved backtest plot to %s", save_path)
                 if self.config.plot:
                     plt.show()
                 plt.close(fig)
@@ -339,35 +432,42 @@ def _parse_args() -> BacktestConfig:
         help="开始日期 YYYY-MM-DD（默认 90 天前）",
     )
     parser.add_argument("--initial-capital", type=float, default=100000.0, help="初始资金 (默认: 100000)")
-    parser.add_argument("--num-of-news", type=int, default=5, help="workflow 模式下每次用多少条新闻 (默认: 5)")
     parser.add_argument(
-        "--mode",
-        type=str,
-        default="technical",
-        choices=["technical", "workflow"],
-        help="technical=快速技术回测(不调用LLM/工作流)，workflow=慢速回测(调用完整工作流)",
+        "--initial-position",
+        type=int,
+        default=None,
+        help="初始持仓股数（不传则运行时询问）",
     )
+    parser.add_argument("--num-of-news", type=int, default=5, help="每次调用工作流使用的新闻数量 (默认: 5)")
     parser.add_argument(
         "--decision-interval",
         type=int,
-        default=5,
-        help="workflow 模式下每 N 个交易日运行一次工作流（默认 5）",
+        default=1,
+        help="每 N 个交易日运行一次工作流（默认 1）",
     )
     parser.add_argument("--plot", action="store_true", help="展示图表（可能阻塞），默认不展示")
-    parser.add_argument("--save-plot", type=str, default="", help="保存图表到路径（默认不保存）")
+    parser.add_argument("--save-plot", type=str, default="", help="保存图表到路径（默认保存到回测日志目录）")
 
     args = parser.parse_args()
     save_plot_path = args.save_plot or None
     if save_plot_path and not os.path.isabs(save_plot_path):
         save_plot_path = os.path.join(os.getcwd(), save_plot_path)
 
+    initial_position = args.initial_position
+    if initial_position is None:
+        try:
+            raw = input("请输入回测初始持仓股数（默认 0）：").strip()
+            initial_position = int(raw) if raw else 0
+        except Exception:
+            initial_position = 0
+
     return BacktestConfig(
         ticker=args.ticker,
         start_date=args.start_date,
         end_date=args.end_date,
         initial_capital=args.initial_capital,
+        initial_position=int(initial_position or 0),
         num_of_news=args.num_of_news,
-        mode=args.mode,
         decision_interval=args.decision_interval,
         plot=bool(args.plot),
         save_plot_path=save_plot_path,
@@ -376,12 +476,8 @@ def _parse_args() -> BacktestConfig:
 
 if __name__ == "__main__":
     cfg = _parse_args()
-    agent = None
-    if cfg.mode == "workflow":
-        from src.main import run_hedge_fund  # lazy import: avoid main side-effects in technical mode
+    from src.main import run_hedge_fund
 
-        agent = run_hedge_fund
-
-    backtester = Backtester(cfg, agent=agent)
+    backtester = Backtester(cfg, agent=run_hedge_fund)
     backtester.run_backtest()
     backtester.analyze_performance()

@@ -10,6 +10,7 @@ import pandas as pd
 from urllib.parse import urlparse
 from src.tools.openrouter_config import get_chat_completion, logger as api_logger
 from src.tools.akshare_cache import get_stock_news as get_stock_news_akshare_cached
+from src.tools.akshare_cache import CACHE_PATH
 from pathlib import Path
 from src.database import AkshareSQLiteCache
 
@@ -481,36 +482,26 @@ def get_news_sentiment(
     # project_root = os.path.dirname(os.path.dirname(
     #     os.path.dirname(os.path.abspath(__file__))))
 
-    # 检查是否有缓存的情感分析结果
-    # 检查是否有缓存的情感分析结果
-    cache_file = os.getenv("SENTIMENT_CACHE_PATH", "src/data/sentiment_cache.json")
-    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-
-    # 缓存 Key 规则（按“股票 + 日期 + 数量”）：避免用新闻内容做 key 造成无限膨胀与跨标的误命中
+    # 缓存 Key 规则（按“股票 + 日期 + 数量”）：避免用新闻内容做 key
     if not cache_date:
         cache_date = datetime.now().strftime("%Y-%m-%d")
     if symbol:
-        news_key = f"{symbol}|{cache_date}|n={int(num_of_news)}|v2"
+        cache_key = f"sentiment|{symbol}|{cache_date}|n={int(num_of_news)}"
     else:
-        # 兼容旧调用方（不传 symbol 时退化为“日期+数量”）
-        news_key = f"{cache_date}|n={int(num_of_news)}|v2"
+        cache_key = f"sentiment|{cache_date}|n={int(num_of_news)}"
 
-    # 检查缓存
-    if os.path.exists(cache_file):
-        print("📦 发现情感分析缓存文件")
+    cache = AkshareSQLiteCache(CACHE_PATH)
+    cached_rows = cache.fetch_records(
+        table="llm_result_cache",
+        filters={"cache_key": cache_key},
+        limit=1,
+    )
+    if cached_rows:
+        cached_val = cached_rows[0].get("result")
         try:
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                cache = json.load(f)
-                if news_key in cache:
-                    print("✅ 使用匹配的情感分析缓存结果")
-                    return cache[news_key]
-                print("ℹ️ 未找到匹配的情感分析缓存")
-        except Exception as e:
-            print(f"⚠️ 读取情感分析缓存出错: {e}")
-            cache = {}
-    else:
-        print("📄 未找到情感分析缓存文件，将创建新文件")
-        cache = {}
+            return float(cached_val)
+        except Exception:
+            pass
 
     # 准备系统消息
     system_message = {
@@ -594,19 +585,17 @@ def get_news_sentiment(
 
 
 
-        # 写入缓存
-
-        cache[news_key] = sentiment_score
-
-        try:
-
-            with open(cache_file, 'w', encoding='utf-8') as f:
-
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-
-        except Exception as e:
-
-            print(f"⚠️ 写入情感缓存失败: {e}")
+        cache.upsert_records(
+            table="llm_result_cache",
+            records=[
+                {
+                    "cache_key": cache_key,
+                    "cache_type": "sentiment",
+                    "result": float(sentiment_score),
+                }
+            ],
+            key_columns=["cache_key"],
+        )
 
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import akshare as ak
@@ -28,7 +29,8 @@ COL_ADJUST_TYPE = "\u590d\u6743\u7c7b\u578b"
 COL_TRADE_DATE = "trade_date"
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-CACHE_PATH = BASE_DIR / "data" / "market_data_cache.db"
+_default_cache_path = BASE_DIR / "data" / "market_data_cache.db"
+CACHE_PATH = Path(os.getenv("MARKET_CACHE_DB_PATH", str(_default_cache_path)))
 HISTORY_TABLE = "baostock_history_k"
 
 logger = setup_logger("akshare_cache")
