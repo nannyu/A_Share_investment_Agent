@@ -26,6 +26,7 @@ venv/
 ENV/
 .venv/
 .claude/
+.factory/
 # Environment Variables
 .env
 .env.local
@@ -86,4 +87,5 @@ reports/
 
 #test
 integration/ 
+.pytest_cache/
 

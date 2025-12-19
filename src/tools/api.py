@@ -90,21 +90,48 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
         # 构建完整指标数据
         logger.info("Building indicators...")
         try:
+            def to_float(value: Any, default: float = 0.0) -> float:
+                """更健壮的 float 转换：兼容 None / NaN / '--' / '1,234.56' 等。"""
+                if value is None:
+                    return default
+                if isinstance(value, (int, float, np.number)):
+                    try:
+                        if pd.isna(value):
+                            return default
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return float(value)
+                if isinstance(value, str):
+                    text = value.strip()
+                    if not text or text in {"--", "None", "nan", "NaN"}:
+                        return default
+                    try:
+                        return float(text.replace(",", ""))
+                    except Exception:  # noqa: BLE001
+                        return default
+                try:
+                    return float(value)
+                except Exception:  # noqa: BLE001
+                    return default
+
             def convert_percentage(value: float) -> float:
                 """将百分比值转换为小数"""
                 try:
-                    return float(value) / 100.0 if value is not None else 0.0
-                except:
+                    return to_float(value, 0.0) / 100.0 if value is not None else 0.0
+                except Exception:  # noqa: BLE001
                     return 0.0
+
+            total_revenue = to_float(latest_income.get("营业总收入", 0), 0.0)
+            total_market_cap = to_float(stock_data.get("总市值", 0), 0.0)
 
             all_metrics = {
                 # 市场数据
-                "market_cap": float(stock_data.get("总市值", 0)),
-                "float_market_cap": float(stock_data.get("流通市值", 0)),
+                "market_cap": total_market_cap,
+                "float_market_cap": to_float(stock_data.get("流通市值", 0), 0.0),
 
                 # 盈利数据
-                "revenue": float(latest_income.get("营业总收入", 0)),
-                "net_income": float(latest_income.get("净利润", 0)),
+                "revenue": total_revenue,
+                "net_income": to_float(latest_income.get("净利润", 0), 0.0),
                 "return_on_equity": convert_percentage(latest_financial.get("净资产收益率(%)", 0)),
                 "net_margin": convert_percentage(latest_financial.get("销售净利率(%)", 0)),
                 "operating_margin": convert_percentage(latest_financial.get("营业利润率(%)", 0)),
@@ -115,15 +142,15 @@ def get_financial_metrics(symbol: str) -> Dict[str, Any]:
                 "book_value_growth": convert_percentage(latest_financial.get("净资产增长率(%)", 0)),
 
                 # 财务健康指标
-                "current_ratio": float(latest_financial.get("流动比率", 0)),
+                "current_ratio": to_float(latest_financial.get("流动比率", 0), 0.0),
                 "debt_to_equity": convert_percentage(latest_financial.get("资产负债率(%)", 0)),
-                "free_cash_flow_per_share": float(latest_financial.get("每股经营性现金流(元)", 0)),
-                "earnings_per_share": float(latest_financial.get("加权每股收益(元)", 0)),
+                "free_cash_flow_per_share": to_float(latest_financial.get("每股经营性现金流(元)", 0), 0.0),
+                "earnings_per_share": to_float(latest_financial.get("加权每股收益(元)", 0), 0.0),
 
                 # 估值比率
-                "pe_ratio": float(stock_data.get("市盈率-动态", 0)),
-                "price_to_book": float(stock_data.get("市净率", 0)),
-                "price_to_sales": float(stock_data.get("总市值", 0)) / float(latest_income.get("营业总收入", 1)) if float(latest_income.get("营业总收入", 0)) > 0 else 0,
+                "pe_ratio": to_float(stock_data.get("市盈率-动态", 0), 0.0),
+                "price_to_book": to_float(stock_data.get("市净率", 0), 0.0),
+                "price_to_sales": (total_market_cap / total_revenue) if total_revenue > 0 else 0.0,
             }
 
             # 只返回 agent 需要的指标
@@ -239,33 +266,56 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         # 构建财务数据
         line_items = []
         try:
+            def to_float(value: Any, default: float = 0.0) -> float:
+                if value is None:
+                    return default
+                if isinstance(value, (int, float, np.number)):
+                    try:
+                        if pd.isna(value):
+                            return default
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return float(value)
+                if isinstance(value, str):
+                    text = value.strip()
+                    if not text or text in {"--", "None", "nan", "NaN"}:
+                        return default
+                    try:
+                        return float(text.replace(",", ""))
+                    except Exception:  # noqa: BLE001
+                        return default
+                try:
+                    return float(value)
+                except Exception:  # noqa: BLE001
+                    return default
+
             # 处理最新期间数据
             current_item = {
                 # 从利润表获取
-                "net_income": float(latest_income.get("净利润", 0)),
-                "operating_revenue": float(latest_income.get("营业总收入", 0)),
-                "operating_profit": float(latest_income.get("营业利润", 0)),
+                "net_income": to_float(latest_income.get("净利润", 0), 0.0),
+                "operating_revenue": to_float(latest_income.get("营业总收入", 0), 0.0),
+                "operating_profit": to_float(latest_income.get("营业利润", 0), 0.0),
 
                 # 从资产负债表计算营运资金
-                "working_capital": float(latest_balance.get("流动资产合计", 0)) - float(latest_balance.get("流动负债合计", 0)),
+                "working_capital": to_float(latest_balance.get("流动资产合计", 0), 0.0) - to_float(latest_balance.get("流动负债合计", 0), 0.0),
 
                 # 从现金流量表获取
-                "depreciation_and_amortization": float(latest_cash_flow.get("固定资产折旧、油气资产折耗、生产性生物资产折旧", 0)),
-                "capital_expenditure": abs(float(latest_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0))),
-                "free_cash_flow": float(latest_cash_flow.get("经营活动产生的现金流量净额", 0)) - abs(float(latest_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0)))
+                "depreciation_and_amortization": to_float(latest_cash_flow.get("固定资产折旧、油气资产折耗、生产性生物资产折旧", 0), 0.0),
+                "capital_expenditure": abs(to_float(latest_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0), 0.0)),
+                "free_cash_flow": to_float(latest_cash_flow.get("经营活动产生的现金流量净额", 0), 0.0) - abs(to_float(latest_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0), 0.0)),
             }
             line_items.append(current_item)
             logger.info("✓ Latest period data processed successfully")
 
             # 处理上一期间数据
             previous_item = {
-                "net_income": float(previous_income.get("净利润", 0)),
-                "operating_revenue": float(previous_income.get("营业总收入", 0)),
-                "operating_profit": float(previous_income.get("营业利润", 0)),
-                "working_capital": float(previous_balance.get("流动资产合计", 0)) - float(previous_balance.get("流动负债合计", 0)),
-                "depreciation_and_amortization": float(previous_cash_flow.get("固定资产折旧、油气资产折耗、生产性生物资产折旧", 0)),
-                "capital_expenditure": abs(float(previous_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0))),
-                "free_cash_flow": float(previous_cash_flow.get("经营活动产生的现金流量净额", 0)) - abs(float(previous_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0)))
+                "net_income": to_float(previous_income.get("净利润", 0), 0.0),
+                "operating_revenue": to_float(previous_income.get("营业总收入", 0), 0.0),
+                "operating_profit": to_float(previous_income.get("营业利润", 0), 0.0),
+                "working_capital": to_float(previous_balance.get("流动资产合计", 0), 0.0) - to_float(previous_balance.get("流动负债合计", 0), 0.0),
+                "depreciation_and_amortization": to_float(previous_cash_flow.get("固定资产折旧、油气资产折耗、生产性生物资产折旧", 0), 0.0),
+                "capital_expenditure": abs(to_float(previous_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0), 0.0)),
+                "free_cash_flow": to_float(previous_cash_flow.get("经营活动产生的现金流量净额", 0), 0.0) - abs(to_float(previous_cash_flow.get("购建固定资产、无形资产和其他长期资产支付的现金", 0), 0.0)),
             }
             line_items.append(previous_item)
             logger.info("✓ Previous period data processed successfully")

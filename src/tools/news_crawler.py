@@ -1,4 +1,6 @@
 import os
+import os
+import os
 import sys
 import json
 import re
@@ -7,7 +9,9 @@ import time
 import pandas as pd
 from urllib.parse import urlparse
 from src.tools.openrouter_config import get_chat_completion, logger as api_logger
-from src.tools.akshare_cache import get_stock_news
+from src.tools.akshare_cache import get_stock_news as get_stock_news_akshare_cached
+from pathlib import Path
+from src.database import AkshareSQLiteCache
 
 # 导入新的搜索模块
 try:
@@ -16,6 +20,16 @@ except ImportError:
     print("⚠️ 警告: 无法导入新的搜索模块，将回退到 akshare")
     google_search_sync = None
     SearchOptions = None
+
+# Tavily Search（可选，推荐用于替代直接爬 Google）
+try:
+    from src.crawler.tavily_search import tavily_search
+except ImportError:
+    tavily_search = None
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+NEWS_CACHE_DB_PATH = BASE_DIR / "data" / "market_data_cache.db"
+NEWS_CACHE_TABLE = "stock_news_cache"
 
 def build_search_query(symbol: str, date: str = None) -> str:
     """
@@ -139,10 +153,54 @@ def convert_search_results_to_news_format(search_results, symbol: str) -> list:
     return news_list
 
 
-def get_stock_news_via_akshare(symbol: str, max_news: int = 10) -> list:
+def convert_tavily_results_to_news_format(results, symbol: str) -> list:
+    """将 Tavily 搜索结果转换为新闻格式（兼容后续 dataflow）。"""
+    news_list = []
+    for r in results or []:
+        title = getattr(r, "title", "") or ""
+        url = getattr(r, "url", "") or ""
+        content = getattr(r, "content", "") or title
+        published_date = getattr(r, "published_date", None)
+
+        if not title or not url:
+            continue
+
+        news_item = {
+            "title": title,
+            "content": content,
+            "source": extract_domain(url),
+            "url": url,
+            "keyword": symbol,
+            "search_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+        if published_date:
+            news_item["publish_time"] = published_date
+        news_list.append(news_item)
+
+    return news_list
+
+
+def _normalize_date_str(value: str | None) -> str:
+    text = (value or "").strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _sort_news_items(items: list) -> list:
+    def _key(x):
+        return x.get("publish_time") or x.get("search_time") or ""
+
+    return sorted(items, key=_key, reverse=True)
+
+
+cache = AkshareSQLiteCache(NEWS_CACHE_DB_PATH)
+
+
+def get_stock_news_via_akshare(symbol: str, max_news: int = 10, *, cache_date: str | None = None) -> list:
     """使用缓存增强的 AkShare 新闻接口"""
     try:
-        news_df = get_stock_news(symbol)
+        news_df = get_stock_news_akshare_cached(symbol, date=cache_date)
         if news_df is None or news_df.empty:
             print(f"⚠️ 未获取到 {symbol} 的新闻数据")
             return []
@@ -194,78 +252,83 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
               新闻来源通过智能搜索引擎获取，包含各大财经网站的相关报道。
     """
 
-    # 限制最大新闻条数
-    max_news = min(max_news, 100)
-
-    # 获取当前日期或使用指定日期
-    cache_date = date if date else datetime.now().strftime("%Y-%m-%d")
-
-    # 构建新闻文件路径
-    news_dir = os.path.join("src", "data", "stock_news")
-    print(f"📁 新闻保存目录: {news_dir}")
-
-    # 确保目录存在
+    # 环境变量控制（全局上限 & Tavily 单次上限）
+    # - NEWS_MAX_NEWS: get_stock_news 的全局上限（默认 100）
+    # - TAVILY_MAX_NEWS: Tavily 每次最多拉取数量（默认 20）
     try:
-        os.makedirs(news_dir, exist_ok=True)
-        print(f"✅ 成功创建或确认目录: {news_dir}")
-    except Exception as e:
-        print(f"❌ 创建目录失败: {e}")
-        return []
+        env_news_max = int(os.getenv("NEWS_MAX_NEWS", "100") or "100")
+    except ValueError:
+        env_news_max = 100
+    try:
+        tavily_max_news = int(os.getenv("TAVILY_MAX_NEWS", "20") or "20")
+    except ValueError:
+        tavily_max_news = 20
 
-    # 缓存文件名包含日期信息
-    news_file = os.path.join(news_dir, f"{symbol}_news_{cache_date}.json")
-    print(f"📝 新闻文件路径: {news_file}")
+    env_news_max = max(1, min(env_news_max, 100))
+    tavily_max_news = max(1, min(tavily_max_news, 20))
 
-    # 检查缓存是否存在且有效
+    # 限制最大新闻条数
+    max_news = min(max_news, env_news_max)
+
+    cache_date = _normalize_date_str(date)
+
+    # 先查 SQLite 缓存：key=股票+日期（避免跨标的/跨日期误命中）
+    cached_records = cache.fetch_records(
+        NEWS_CACHE_TABLE,
+        filters={"symbol": symbol, "cache_date": cache_date},
+        order_by='"publish_time" DESC, "search_time" DESC',
+        limit=max_news,
+    )
     cached_news = []
-    cache_valid = False
+    for r in cached_records:
+        r = dict(r)
+        r.pop("缓存时间", None)
+        cached_news.append(
+            {
+                "title": r.get("title", ""),
+                "content": r.get("content", ""),
+                "source": r.get("source", ""),
+                "url": r.get("url", ""),
+                "keyword": symbol,
+                "publish_time": r.get("publish_time") or "",
+                "search_time": r.get("search_time") or "",
+            }
+        )
 
-    if os.path.exists(news_file):
-        try:
-            # 检查缓存文件的修改时间（时效性检查）
-            file_mtime = os.path.getmtime(news_file)
-            current_time = time.time()
-            # 缓存有效期：当天的缓存在当天有效，历史日期的缓存始终有效
-            if date:  # 如果指定了历史日期，缓存始终有效
-                cache_valid = True
-            else:  # 如果是当天数据，检查是否在同一天创建
-                cache_date_obj = datetime.fromtimestamp(file_mtime).date()
-                today = datetime.now().date()
-                cache_valid = cache_date_obj == today
+    if len(cached_news) >= max_news:
+        print(f"📦 DB 缓存命中: {symbol} {cache_date}（{len(cached_news)} 条）")
+        return cached_news[:max_news]
 
-            if cache_valid:
-                with open(news_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    cached_news = data.get("news", [])
-
-                    if len(cached_news) >= max_news:
-                        print(
-                            f"📦 使用缓存新闻: {news_file} (缓存数量: {len(cached_news)})")
-                        return cached_news[:max_news]
-                    else:
-                        print(
-                            f"📦 缓存仅有 {len(cached_news)} 条，需补齐到 {max_news} 条，准备继续抓取")
-            else:
-                print(f"🕒 缓存超过 {cache_expiry_minutes} 分钟，重新获取新闻")
-
-        except Exception as e:
-            print(f"⚠️ 读取缓存文件失败: {e}")
-            cached_news = []
-
-    print(f'🚀 开始获取 {symbol} 的新闻数据...')
+    print(f"🚀 DB 缓存不足: {symbol} {cache_date}（已有 {len(cached_news)} 条，需 {max_news} 条）")
 
     # 计算需要获取的新闻数量
     need_more_news = max_news - len(cached_news)
     fetch_count = max(need_more_news, max_news)  # 至少获取请求的数量
 
-    # 优先尝试使用新的 Google 搜索方法
+    # 构建搜索查询（Tavily/Google 共用）
+    search_query = build_search_query(symbol, date)
+
+    # 优先：Tavily（需要配置 TAVILY_API_KEY；比直接爬 Google 更稳定）
     new_news_list = []
-    if google_search_sync and SearchOptions:
+    fetch_method = None
+    if tavily_search:
+        try:
+            print("🧭 使用 Tavily 搜索获取新闻...")
+            print(f"🔍 搜索查询: {search_query}")
+            tavily_results = tavily_search(search_query, max_results=min(fetch_count, tavily_max_news))
+            new_news_list = convert_tavily_results_to_news_format(tavily_results, symbol)
+            if new_news_list:
+                fetch_method = "tavily"
+                print(f"✅ Tavily 获取 {len(new_news_list)} 条新闻")
+            else:
+                print("⚠️ Tavily 返回 0 条结果，回退到 Google/akshare")
+        except Exception as e:
+            print(f"⚠️ Tavily 搜索出错({e})，回退到 Google/akshare")
+
+    # 次优先：Google（Playwright，可能被 /sorry 拦截）
+    if not new_news_list and google_search_sync and SearchOptions:
         try:
             print("🌐 使用 Google 搜索获取新闻...")
-
-            # 构建搜索查询
-            search_query = build_search_query(symbol, date)
             print(f"🔍 搜索查询: {search_query}")
 
             # 执行搜索
@@ -282,6 +345,7 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
                 new_news_list = convert_search_results_to_news_format(
                     search_response.results, symbol)
 
+                fetch_method = "google"
                 print(f"✅ Google 搜索获取 {len(new_news_list)} 条新闻")
             else:
                 print("⚠️ Google 搜索未返回有效结果，回退到 akshare")
@@ -292,56 +356,67 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
     # 如果 Google 搜索失败，回退到 akshare
     if not new_news_list:
         print("🀄 使用 akshare 获取新闻...")
-        new_news_list = get_stock_news_via_akshare(symbol, fetch_count)
-
-    # 合并缓存和新获取的新闻，去重
-    if cached_news and new_news_list:
-        # 创建已有新闻的标题集合用于去重
-        existing_titles = {news['title'] for news in cached_news}
-
-        # 过滤掉重复的新闻
-        unique_new_news = [
-            news for news in new_news_list
-            if news['title'] not in existing_titles
-        ]
-
-        # 合并新闻列表
-        combined_news = cached_news + unique_new_news
-        print(
-            f"➕ 合并缓存 {len(cached_news)} 条 + 新增 {len(unique_new_news)} 条 = {len(combined_news)} 条")
-    else:
-        combined_news = new_news_list or cached_news
-
-    # 按发布时间排序（如果有发布时间信息）
-    try:
-        combined_news.sort(key=lambda x: x.get(
-            "publish_time", ""), reverse=True)
-    except:
-        pass  # 如果排序失败，保持原顺序
-
-    # 只保留指定条数的新闻
-    final_news_list = combined_news[:max_news]
-
-    # 保存到文件（只有当获取到新数据时才保存）
-    if new_news_list or not cache_valid:
+        new_news_list = get_stock_news_via_akshare(symbol, fetch_count, cache_date=cache_date)
+        fetch_method = "akshare"
+    # 如果 Tavily 返回不足（例如 max_news>20），允许 AkShare 补齐缺口
+    elif fetch_method == "tavily" and len(new_news_list) < need_more_news:
+        print(f"🧩 Tavily 仅返回 {len(new_news_list)} 条，尝试用 akshare 补齐缺口…")
         try:
-            save_data = {
-                "date": cache_date,
-                "method": "online_search" if new_news_list and google_search_sync else "akshare",
-                "query": build_search_query(symbol, date) if new_news_list and google_search_sync else None,
-                "news": combined_news,  # 保存所有新闻，不只是返回的部分
-                "cached_count": len(cached_news),
-                "new_count": len(new_news_list),
-                "total_count": len(combined_news),
-                "last_updated": datetime.now().isoformat()
-            }
-            with open(news_file, 'w', encoding='utf-8') as f:
-                json.dump(save_data, f, ensure_ascii=False, indent=2)
-            print(f"💾 成功保存 {len(combined_news)} 条新闻 -> {news_file}")
+            more = get_stock_news_via_akshare(
+                symbol,
+                max(need_more_news - len(new_news_list), 0),
+                cache_date=cache_date,
+            )
+            if more:
+                existing_titles = {news.get("title", "") for news in new_news_list}
+                for item in more:
+                    title = item.get("title", "")
+                    if title and title not in existing_titles:
+                        new_news_list.append(item)
+                        existing_titles.add(title)
+            fetch_method = "tavily+akshare"
         except Exception as e:
-            print(f"❌ 保存新闻数据失败: {e}")
+            print(f"⚠️ akshare 补齐失败: {e}")
 
-    return final_news_list
+    # 合并缓存和新获取的新闻，去重（title 维度）
+    combined_news = cached_news[:]
+    existing_titles = {news.get("title", "") for news in combined_news}
+    unique_new_news = []
+    for item in new_news_list:
+        title = item.get("title", "")
+        if not title or title in existing_titles:
+            continue
+        unique_new_news.append(item)
+        existing_titles.add(title)
+    combined_news.extend(unique_new_news)
+    combined_news = _sort_news_items(combined_news)
+
+    # 写入 DB（只写新增部分即可）
+    if unique_new_news:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        rows = []
+        for n in unique_new_news:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "cache_date": cache_date,
+                    "title": n.get("title", ""),
+                    "content": n.get("content", ""),
+                    "source": n.get("source", ""),
+                    "url": n.get("url", ""),
+                    "publish_time": n.get("publish_time") or "",
+                    "search_time": n.get("search_time") or now_str,
+                    "method": fetch_method or "",
+                }
+            )
+        cache.upsert_records(
+            NEWS_CACHE_TABLE,
+            rows,
+            key_columns=["symbol", "cache_date", "title"],
+        )
+        print(f"💾 DB 写入新闻: {symbol} {cache_date}（新增 {len(rows)} 条，来源={fetch_method}）")
+
+    return combined_news[:max_news]
 
 
 def _parse_sentiment_score(raw_text: str) -> float:
@@ -383,7 +458,13 @@ def _parse_sentiment_score(raw_text: str) -> float:
     raise ValueError(f"Unable to parse numeric sentiment score from response: {text[:160]}")
 
 
-def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
+def get_news_sentiment(
+    news_list: list,
+    num_of_news: int = 5,
+    *,
+    symbol: str | None = None,
+    cache_date: str | None = None,
+) -> float:
     """分析新闻情感得分
 
     Args:
@@ -402,14 +483,17 @@ def get_news_sentiment(news_list: list, num_of_news: int = 5) -> float:
 
     # 检查是否有缓存的情感分析结果
     # 检查是否有缓存的情感分析结果
-    cache_file = "src/data/sentiment_cache.json"
+    cache_file = os.getenv("SENTIMENT_CACHE_PATH", "src/data/sentiment_cache.json")
     os.makedirs(os.path.dirname(cache_file), exist_ok=True)
 
-    # 生成新闻内容的唯一标识
-    news_key = "|".join([
-        f"{news.get('title', '')}|{(news.get('content') or '')[:100]}|{news.get('publish_time', '')}"
-        for news in news_list[:num_of_news]
-    ])
+    # 缓存 Key 规则（按“股票 + 日期 + 数量”）：避免用新闻内容做 key 造成无限膨胀与跨标的误命中
+    if not cache_date:
+        cache_date = datetime.now().strftime("%Y-%m-%d")
+    if symbol:
+        news_key = f"{symbol}|{cache_date}|n={int(num_of_news)}|v2"
+    else:
+        # 兼容旧调用方（不传 symbol 时退化为“日期+数量”）
+        news_key = f"{cache_date}|n={int(num_of_news)}|v2"
 
     # 检查缓存
     if os.path.exists(cache_file):

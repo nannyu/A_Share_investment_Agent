@@ -1,8 +1,11 @@
-from src.tools.news_crawler import get_stock_news
 import os
 import sys
 import json
 from datetime import datetime
+
+import pytest
+
+from src.tools.news_crawler import get_stock_news
 
 # 添加项目根目录到 Python 路径
 project_root = os.path.dirname(os.path.dirname(
@@ -12,6 +15,9 @@ sys.path.append(project_root)
 
 def test_news_crawler():
     """测试新闻爬取和保存功能"""
+    if os.getenv("RUN_LIVE_NEWS_TESTS") != "1":
+        pytest.skip("Set RUN_LIVE_NEWS_TESTS=1 to run live news crawler tests.")
+
     # 测试参数
     test_symbols = ["600519", "300750", "000001"]  # 测试不同的股票代码
     test_news_counts = [5, 10, 20]  # 测试不同的新闻数量

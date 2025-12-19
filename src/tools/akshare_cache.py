@@ -23,6 +23,7 @@ COL_REPORT_TYPE = "\u62a5\u8868\u7c7b\u578b"
 COL_KEYWORD = "\u5173\u952e\u8bcd"
 COL_PUBLISH_TIME = "\u53d1\u5e03\u65f6\u95f4"
 COL_HEADLINE = "\u65b0\u95fb\u6807\u9898"
+COL_CACHE_DATE = "\u7f13\u5b58\u65e5\u671f"
 COL_ADJUST_TYPE = "\u590d\u6743\u7c7b\u578b"
 COL_TRADE_DATE = "trade_date"
 
@@ -319,11 +320,34 @@ def get_price_history_df(
     logger.info("%s，标的=%s，输出行数=%d", source_tag, symbol, len(result))
     return result
 
-def get_stock_news(symbol: str, ttl_seconds: int = 2 * 3600) -> pd.DataFrame:
+def _normalize_date_str(value: str) -> str:
+    value = (value or "").strip()
+    if len(value) >= 10 and value[4] == "-" and value[7] == "-":
+        return value[:10]
+    return value
+
+
+def get_stock_news(
+    symbol: str,
+    *,
+    date: Optional[str] = None,
+    ttl_seconds: int = 2 * 3600,
+) -> pd.DataFrame:
+    """
+    获取新闻并缓存到 SQLite。
+
+    缓存 key（命中维度）按“标的 + 日期”进行过滤，避免跨日期误命中。
+    - date=None：默认使用今天（UTC+0 的 date string），并应用 ttl_seconds
+    - date=YYYY-MM-DD：按指定日期命中；历史日期不使用 TTL（视为稳定）
+    """
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = _normalize_date_str(date or today_str)
+    effective_ttl = ttl_seconds if date is None or date_str == today_str else None
+
     cached = cache.fetch_records(
         table="stock_news_em",
-        filters={COL_KEYWORD: symbol},
-        ttl_seconds=ttl_seconds,
+        filters={COL_KEYWORD: symbol, COL_CACHE_DATE: date_str},
+        ttl_seconds=effective_ttl,
         order_by=f'"{COL_PUBLISH_TIME}" DESC',
     )
     if cached:
@@ -338,10 +362,21 @@ def get_stock_news(symbol: str, ttl_seconds: int = 2 * 3600) -> pd.DataFrame:
         return pd.DataFrame()
 
     df[COL_KEYWORD] = symbol
+    # 为缓存命中增加“日期”维度
+    if COL_PUBLISH_TIME in df.columns:
+        df[COL_CACHE_DATE] = df[COL_PUBLISH_TIME].astype(str).str.slice(0, 10)
+    else:
+        df[COL_CACHE_DATE] = date_str
+
+    # 只缓存目标日期的数据（避免把历史/其它日期混入当天 cache key）
+    df = df[df[COL_CACHE_DATE] == date_str].copy()
+    if df.empty:
+        return pd.DataFrame()
+
     cache.upsert_records(
         "stock_news_em",
         df.to_dict("records"),
-        key_columns=[COL_KEYWORD, COL_PUBLISH_TIME, COL_HEADLINE],
+        key_columns=[COL_KEYWORD, COL_CACHE_DATE, COL_HEADLINE],
     )
     _log_cache_upsert("stock_news_em", symbol, len(df))
     return df

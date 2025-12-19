@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import tempfile
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from urllib.parse import urlparse
@@ -30,6 +32,31 @@ class SearchResponse:
     """搜索响应"""
     query: str
     results: List[SearchResult]
+    diagnostics: Optional["SearchDiagnostics"] = None
+
+
+@dataclass
+class SearchDiagnostics:
+    """搜索诊断信息（用于调试反爬、指纹、缓存状态等）"""
+
+    google_domain: Optional[str] = None
+    used_headless: Optional[bool] = None
+    detected_block: bool = False
+    blocked_url: Optional[str] = None
+    state_file: Optional[str] = None
+    state_file_loaded: bool = False
+    fingerprint_file_loaded: bool = False
+    saved_state_fingerprint_loaded: bool = False
+    saved_state_google_domain_loaded: bool = False
+    saved_state_write_ok: bool = False
+    error: Optional[str] = None
+    page_title: Optional[str] = None
+    final_url: Optional[str] = None
+    consent_clicked: bool = False
+    attempt: int = 1
+    rotated_google_domain: bool = False
+    rotated_fingerprint: bool = False
+    failure_reason: Optional[str] = None
 
 
 @dataclass
@@ -40,6 +67,10 @@ class SearchOptions:
     state_file: Optional[str] = "./browser-state.json"
     no_save_state: Optional[bool] = False
     locale: Optional[str] = "zh-CN"
+    fingerprint_ttl_seconds: Optional[int] = 6 * 3600
+    max_attempts: Optional[int] = 2
+    rotate_google_domain_on_failure: Optional[bool] = True
+    rotate_fingerprint_on_failure: Optional[bool] = True
 
 
 @dataclass
@@ -58,6 +89,13 @@ class SavedState:
     """保存的状态"""
     fingerprint: Optional[FingerprintConfig] = None
     google_domain: Optional[str] = None
+
+
+def _is_google_blocked(url: str) -> bool:
+    if not url:
+        return False
+    sorry_patterns = ["google.com/sorry", "recaptcha", "captcha", "unusual traffic"]
+    return any(pattern in url for pattern in sorry_patterns)
 
 
 def get_host_machine_config(user_locale: Optional[str] = None) -> FingerprintConfig:
@@ -91,6 +129,33 @@ def get_host_machine_config(user_locale: Optional[str] = None) -> FingerprintCon
     )
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _should_rotate_fingerprint(fingerprint_data: Optional[Dict[str, Any]], ttl_seconds: Optional[int]) -> bool:
+    if not ttl_seconds or ttl_seconds <= 0:
+        return False
+    if not fingerprint_data:
+        return True
+    generated_at = _parse_iso_datetime(str(fingerprint_data.get("generated_at") or ""))
+    if not generated_at:
+        return True
+    return datetime.now(timezone.utc) - generated_at > timedelta(seconds=int(ttl_seconds))
+
+
 async def google_search(
     query: str,
     options: Optional[SearchOptions] = None,
@@ -113,10 +178,15 @@ async def google_search(
     # 设置默认值
     limit = options.limit or 10
     timeout = options.timeout or 60000
-    state_file = options.state_file or "./browser-state.json"
+    state_file = str(Path(options.state_file or "./browser-state.json"))
     no_save_state = options.no_save_state or False
     locale = options.locale or "zh-CN"
+    fingerprint_ttl_seconds = options.fingerprint_ttl_seconds
+    max_attempts = max(1, int(options.max_attempts or 1))
+    rotate_google_domain_on_failure = bool(options.rotate_google_domain_on_failure)
+    rotate_fingerprint_on_failure = bool(options.rotate_fingerprint_on_failure)
 
+    diagnostics = SearchDiagnostics(state_file=options.state_file if options else None)
     logger.info(f"正在初始化浏览器搜索: {query}")
 
     # 检查状态文件
@@ -125,22 +195,32 @@ async def google_search(
 
     # 指纹配置文件路径
     fingerprint_file = state_file.replace(".json", "-fingerprint.json")
+    fingerprint_payload: Optional[Dict[str, Any]] = None
 
     if os.path.exists(state_file):
         logger.info(f"发现浏览器状态文件: {state_file}")
         storage_state = state_file
+        diagnostics.state_file_loaded = True
 
         # 尝试加载保存的指纹配置
         if os.path.exists(fingerprint_file):
             try:
                 with open(fingerprint_file, 'r', encoding='utf-8') as f:
                     fingerprint_data = json.load(f)
+                    fingerprint_payload = fingerprint_data
                     if fingerprint_data.get('fingerprint'):
                         fp = fingerprint_data['fingerprint']
-                        saved_state.fingerprint = FingerprintConfig(**fp)
+                        if _should_rotate_fingerprint(fingerprint_data, fingerprint_ttl_seconds):
+                            diagnostics.rotated_fingerprint = True
+                            saved_state.fingerprint = get_host_machine_config(locale)
+                        else:
+                            saved_state.fingerprint = FingerprintConfig(**fp)
+                            diagnostics.saved_state_fingerprint_loaded = True
                     saved_state.google_domain = fingerprint_data.get(
                         'google_domain')
+                    diagnostics.saved_state_google_domain_loaded = bool(saved_state.google_domain)
                 logger.info("已加载保存的浏览器指纹配置")
+                diagnostics.fingerprint_file_loaded = True
             except Exception as e:
                 logger.warning(f"无法加载指纹配置文件: {e}")
     else:
@@ -168,6 +248,7 @@ async def google_search(
 
     async def perform_search(headless: bool = True) -> SearchResponse:
         """执行实际的搜索操作"""
+        diagnostics.used_headless = headless
         browser_was_provided = existing_browser is not None
         browser = existing_browser
 
@@ -235,27 +316,61 @@ async def google_search(
                 import random
                 selected_domain = random.choice(google_domains)
                 saved_state.google_domain = selected_domain
+            diagnostics.google_domain = selected_domain
 
             logger.info(f"访问 Google 搜索页面: {selected_domain}")
 
             # 访问 Google
             await page.goto(selected_domain, timeout=timeout)
+            diagnostics.final_url = page.url
+            try:
+                diagnostics.page_title = await page.title()
+            except Exception:
+                diagnostics.page_title = None
+
+            # 处理 Google 同意/隐私弹窗（常见于新会话）
+            # 这不是“绕过反爬”，只是点击页面自身的同意按钮以继续访问。
+            consent_selectors = [
+                "button#L2AGLb",  # desktop: I agree
+                "button:has-text('I agree')",
+                "button:has-text('Accept all')",
+                "button:has-text('同意')",
+                "button:has-text('接受全部')",
+                "form[action*='consent'] button",
+            ]
+            for selector in consent_selectors:
+                try:
+                    btn = await page.query_selector(selector)
+                    if btn:
+                        await btn.click(timeout=3000)
+                        diagnostics.consent_clicked = True
+                        logger.info("已点击同意/接受按钮，继续搜索流程")
+                        await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                        diagnostics.final_url = page.url
+                        try:
+                            diagnostics.page_title = await page.title()
+                        except Exception:
+                            diagnostics.page_title = None
+                        break
+                except Exception:
+                    continue
 
             # 检查是否遇到人机验证
             current_url = page.url
-            sorry_patterns = ["google.com/sorry",
-                              "recaptcha", "captcha", "unusual traffic"]
-            is_blocked = any(
-                pattern in current_url for pattern in sorry_patterns)
+            is_blocked = _is_google_blocked(current_url)
 
             if is_blocked and headless:
                 logger.warning("检测到人机验证，切换到有头模式")
+                diagnostics.detected_block = True
+                diagnostics.blocked_url = current_url
                 await context.close()
                 if not browser_was_provided:
                     await browser.close()
                 return await perform_search(headless=False)
             elif is_blocked:
                 logger.warning("检测到人机验证，请手动完成")
+                diagnostics.detected_block = True
+                diagnostics.blocked_url = current_url
                 await page.wait_for_navigation(timeout=timeout * 2)
 
             # 查找搜索框
@@ -284,8 +399,27 @@ async def google_search(
             await page.keyboard.type(query, delay=50)
             await page.keyboard.press("Enter")
 
-            # 等待搜索结果
-            await page.wait_for_load_state("networkidle", timeout=timeout)
+            # 等待跳转到搜索结果页（避免停留在首页导致提取为空）
+            try:
+                await page.wait_for_url("**/search**", timeout=timeout)
+            except Exception:
+                logger.warning("未检测到跳转到搜索结果页（仍可能已加载结果，继续尝试解析）")
+
+            # 等待搜索结果页面基本加载完成（networkidle 在某些环境下可能过于严格）
+            await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+            diagnostics.final_url = page.url
+            try:
+                diagnostics.page_title = await page.title()
+            except Exception:
+                diagnostics.page_title = None
+
+            # 搜索后再次检查是否被拦截（常见：提交搜索后跳到 /sorry）
+            blocked_after_search = _is_google_blocked(page.url)
+            if blocked_after_search:
+                diagnostics.detected_block = True
+                diagnostics.blocked_url = page.url
+                diagnostics.failure_reason = "blocked"
+                logger.warning("搜索后检测到人机验证/拦截：%s", page.url)
 
             # 等待搜索结果元素
             result_selectors = ["#search", "#rso",
@@ -303,98 +437,121 @@ async def google_search(
 
             if not results_found:
                 logger.warning("未找到搜索结果元素")
+                # 兜底等待一次 h3（Google DOM 经常变化）
+                try:
+                    await page.wait_for_selector("h3", timeout=15000)
+                    results_found = True
+                    logger.info("兜底：已检测到 h3 元素，继续提取结果")
+                except Exception:
+                    pass
 
-            # 提取搜索结果
-            results = await page.evaluate(f"""
-                () => {{
-                    const results = [];
-                    const maxResults = {limit};
-                    const seenUrls = new Set();
-                    
-                    // 定义选择器组合
-                    const selectorSets = [
-                        {{ container: '#search div[data-hveid]', title: 'h3', snippet: '.VwiC3b' }},
-                        {{ container: '#rso div[data-hveid]', title: 'h3', snippet: '[data-sncf="1"]' }},
-                        {{ container: '.g', title: 'h3', snippet: 'div[style*="webkit-line-clamp"]' }},
-                        {{ container: 'div[jscontroller][data-hveid]', title: 'h3', snippet: 'div[role="text"]' }}
-                    ];
-                    
-                    // 备用摘要选择器
-                    const alternativeSnippetSelectors = [
-                        '.VwiC3b', '[data-sncf="1"]', 'div[style*="webkit-line-clamp"]', 'div[role="text"]'
-                    ];
-                    
-                    // 尝试每组选择器
-                    for (const selectors of selectorSets) {{
-                        if (results.length >= maxResults) break;
+            # 提取搜索结果（若被拦截则跳过解析，直接返回空结果并保存状态）
+            if blocked_after_search:
+                results = []
+            else:
+                results = await page.evaluate(f"""
+                    () => {{
+                        const results = [];
+                        const maxResults = {limit};
+                        const seenUrls = new Set();
                         
-                        const containers = document.querySelectorAll(selectors.container);
+                        // 定义选择器组合
+                        const selectorSets = [
+                            {{ container: '#search div[data-hveid]', title: 'h3', snippet: '.VwiC3b' }},
+                            {{ container: '#rso div[data-hveid]', title: 'h3', snippet: '[data-sncf="1"]' }},
+                            {{ container: '.g', title: 'h3', snippet: 'div[style*="webkit-line-clamp"]' }},
+                            {{ container: 'div[jscontroller][data-hveid]', title: 'h3', snippet: 'div[role="text"]' }}
+                        ];
                         
-                        for (const container of containers) {{
+                        // 备用摘要选择器
+                        const alternativeSnippetSelectors = [
+                            '.VwiC3b', '[data-sncf="1"]', 'div[style*="webkit-line-clamp"]', 'div[role="text"]'
+                        ];
+                        
+                        // 尝试每组选择器
+                        for (const selectors of selectorSets) {{
                             if (results.length >= maxResults) break;
                             
-                            const titleElement = container.querySelector(selectors.title);
-                            if (!titleElement) continue;
+                            const containers = document.querySelectorAll(selectors.container);
                             
-                            const title = (titleElement.textContent || "").trim();
-                            
-                            // 查找链接
-                            let link = '';
-                            const linkInTitle = titleElement.querySelector('a');
-                            if (linkInTitle) {{
-                                link = linkInTitle.href;
-                            }} else {{
-                                let current = titleElement;
-                                while (current && current.tagName !== 'A') {{
-                                    current = current.parentElement;
-                                }}
-                                if (current && current instanceof HTMLAnchorElement) {{
-                                    link = current.href;
+                            for (const container of containers) {{
+                                if (results.length >= maxResults) break;
+                                
+                                const titleElement = container.querySelector(selectors.title);
+                                if (!titleElement) continue;
+                                
+                                const title = (titleElement.textContent || "").trim();
+                                
+                                // 查找链接
+                                let link = '';
+                                const linkInTitle = titleElement.querySelector('a');
+                                if (linkInTitle) {{
+                                    link = linkInTitle.href;
                                 }} else {{
-                                    const containerLink = container.querySelector('a');
-                                    if (containerLink) {{
-                                        link = containerLink.href;
+                                    let current = titleElement;
+                                    while (current && current.tagName !== 'A') {{
+                                        current = current.parentElement;
                                     }}
-                                }}
-                            }}
-                            
-                            // 过滤无效链接
-                            if (!link || !link.startsWith('http') || seenUrls.has(link)) continue;
-                            
-                            // 查找摘要
-                            let snippet = '';
-                            const snippetElement = container.querySelector(selectors.snippet);
-                            if (snippetElement) {{
-                                snippet = (snippetElement.textContent || "").trim();
-                            }} else {{
-                                for (const altSelector of alternativeSnippetSelectors) {{
-                                    const element = container.querySelector(altSelector);
-                                    if (element) {{
-                                        snippet = (element.textContent || "").trim();
-                                        break;
+                                    if (current && current instanceof HTMLAnchorElement) {{
+                                        link = current.href;
+                                    }} else {{
+                                        const containerLink = container.querySelector('a');
+                                        if (containerLink) {{
+                                            link = containerLink.href;
+                                        }}
                                     }}
                                 }}
                                 
-                                if (!snippet) {{
-                                    const textNodes = Array.from(container.querySelectorAll('div')).filter(el =>
-                                        !el.querySelector('h3') && (el.textContent || "").trim().length > 20
-                                    );
-                                    if (textNodes.length > 0) {{
-                                        snippet = (textNodes[0].textContent || "").trim();
+                                // 过滤无效链接
+                                if (!link || !link.startsWith('http') || seenUrls.has(link)) continue;
+                                
+                                // 查找摘要
+                                let snippet = '';
+                                const snippetElement = container.querySelector(selectors.snippet);
+                                if (snippetElement) {{
+                                    snippet = (snippetElement.textContent || "").trim();
+                                }} else {{
+                                    for (const altSelector of alternativeSnippetSelectors) {{
+                                        const element = container.querySelector(altSelector);
+                                        if (element) {{
+                                            snippet = (element.textContent || "").trim();
+                                            break;
+                                        }}
+                                    }}
+                                    
+                                    if (!snippet) {{
+                                        const textNodes = Array.from(container.querySelectorAll('div')).filter(el =>
+                                            !el.querySelector('h3') && (el.textContent || "").trim().length > 20
+                                        );
+                                        if (textNodes.length > 0) {{
+                                            snippet = (textNodes[0].textContent || "").trim();
+                                        }}
                                     }}
                                 }}
+                                
+                                if (title && link) {{
+                                    results.push({{ title, link, snippet }});
+                                    seenUrls.add(link);
+                                }}
                             }}
-                            
-                            if (title && link) {{
-                                results.push({{ title, link, snippet }});
+                        }}
+
+                        // 兜底：如果以上策略没拿到结果，尝试最宽松的 a+h3 结构
+                        if (results.length === 0) {{
+                            const nodes = Array.from(document.querySelectorAll('a h3')).slice(0, maxResults);
+                            for (const h3 of nodes) {{
+                                const a = h3.closest('a');
+                                const title = (h3.textContent || '').trim();
+                                const link = a ? (a.href || '') : '';
+                                if (!title || !link || seenUrls.has(link) || !link.startsWith('http')) continue;
+                                results.push({{ title, link, snippet: '' }});
                                 seenUrls.add(link);
                             }}
                         }}
+                        
+                        return results.slice(0, maxResults);
                     }}
-                    
-                    return results.slice(0, maxResults);
-                }}
-            """)
+                """)
 
             logger.info(f"成功获取到 {len(results)} 条搜索结果")
 
@@ -409,16 +566,24 @@ async def google_search(
                         saved_state.fingerprint = get_host_machine_config(
                             locale)
 
+                    previous = fingerprint_payload or {}
+                    generated_at = previous.get("generated_at")
+                    if diagnostics.rotated_fingerprint or not generated_at:
+                        generated_at = _utc_now_iso()
+
                     fingerprint_data = {
-                        'fingerprint': {
-                            'device_name': saved_state.fingerprint.device_name,
-                            'locale': saved_state.fingerprint.locale,
-                            'timezone_id': saved_state.fingerprint.timezone_id,
-                            'color_scheme': saved_state.fingerprint.color_scheme,
-                            'reduced_motion': saved_state.fingerprint.reduced_motion,
-                            'forced_colors': saved_state.fingerprint.forced_colors
+                        "generated_at": generated_at,
+                        "last_used_at": _utc_now_iso(),
+                        "use_count": int(previous.get("use_count") or 0) + 1,
+                        "fingerprint": {
+                            "device_name": saved_state.fingerprint.device_name,
+                            "locale": saved_state.fingerprint.locale,
+                            "timezone_id": saved_state.fingerprint.timezone_id,
+                            "color_scheme": saved_state.fingerprint.color_scheme,
+                            "reduced_motion": saved_state.fingerprint.reduced_motion,
+                            "forced_colors": saved_state.fingerprint.forced_colors,
                         },
-                        'google_domain': saved_state.google_domain
+                        "google_domain": saved_state.google_domain,
                     }
 
                     with open(fingerprint_file, 'w', encoding='utf-8') as f:
@@ -426,6 +591,7 @@ async def google_search(
                                   ensure_ascii=False, indent=2)
 
                     logger.info("浏览器状态保存成功")
+                    diagnostics.saved_state_write_ok = True
                 except Exception as e:
                     logger.error(f"保存浏览器状态时出错: {e}")
 
@@ -440,10 +606,11 @@ async def google_search(
                 for r in results
             ]
 
-            return SearchResponse(query=query, results=search_results)
+            return SearchResponse(query=query, results=search_results, diagnostics=diagnostics)
 
         except Exception as e:
             logger.error(f"搜索过程中发生错误: {e}")
+            diagnostics.error = str(e)
 
             # 尝试保存状态即使出错
             try:
@@ -467,11 +634,40 @@ async def google_search(
                     title="搜索失败",
                     link="",
                     snippet=f"无法完成搜索，错误信息: {str(e)}"
-                )]
+                )],
+                diagnostics=diagnostics,
             )
 
-    # 首先尝试无头模式
-    return await perform_search(headless=True)
+    # 首先尝试无头模式；若失败则按策略轮换指纹/域名后重试（最多 max_attempts 次）
+    last_response: Optional[SearchResponse] = None
+    for attempt in range(1, max_attempts + 1):
+        diagnostics.attempt = attempt
+
+        response = await perform_search(headless=True)
+        last_response = response
+
+        if response.results and response.results[0].title != "搜索失败":
+            return response
+
+        if diagnostics.detected_block:
+            diagnostics.failure_reason = diagnostics.failure_reason or "blocked"
+            logger.warning("本次搜索被拦截（attempt=%s）：%s", attempt, diagnostics.blocked_url or "")
+        else:
+            diagnostics.failure_reason = "empty_results"
+            logger.warning("本次搜索结果为空（attempt=%s）。", attempt)
+
+        if attempt >= max_attempts:
+            return response
+
+        if rotate_google_domain_on_failure:
+            saved_state.google_domain = None
+            diagnostics.rotated_google_domain = True
+
+        if rotate_fingerprint_on_failure:
+            saved_state.fingerprint = get_host_machine_config(locale)
+            diagnostics.rotated_fingerprint = True
+
+    return last_response or SearchResponse(query=query, results=[], diagnostics=diagnostics)
 
 # 同步包装函数
 

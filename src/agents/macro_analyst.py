@@ -56,7 +56,7 @@ def macro_analyst_agent(state: AgentState):
         }
     else:
         # 获取宏观分析结果
-        macro_analysis = get_macro_news_analysis(recent_news)
+        macro_analysis = get_macro_news_analysis(recent_news, symbol=symbol, cache_date=end_date)
         message_content = macro_analysis
         logger.info(
             "📊 宏观分析完成: env=%s impact=%s (news=%d)",
@@ -91,7 +91,7 @@ def macro_analyst_agent(state: AgentState):
     }
 
 
-def get_macro_news_analysis(news_list: list) -> dict:
+def get_macro_news_analysis(news_list: list, *, symbol: str | None = None, cache_date: str | None = None) -> dict:
     """分析宏观经济新闻对股票的影响
 
     Args:
@@ -110,17 +110,16 @@ def get_macro_news_analysis(news_list: list) -> dict:
 
     # 检查缓存
     import os
-    cache_file = "src/data/macro_analysis_cache.json"
+    cache_file = os.getenv("MACRO_ANALYSIS_CACHE_PATH", "src/data/macro_analysis_cache.json")
     os.makedirs(os.path.dirname(cache_file), exist_ok=True)
 
-    # 生成新闻内容的唯一标识
-    news_key_parts = []
-    for news in news_list[:20]:  # 使用前20条新闻作为标识
-        title = news.get("title", "")
-        publish_time = news.get("publish_time") or news.get("search_time") or ""
-        source = news.get("source", "")
-        news_key_parts.append(f"{title}|{publish_time}|{source}")
-    news_key = "|".join(news_key_parts)
+    # 缓存 Key 规则（按“股票 + 日期 + v2”）：不要用新闻内容作为 key
+    if not cache_date:
+        cache_date = datetime.now().strftime("%Y-%m-%d")
+    if symbol:
+        news_key = f"{symbol}|{cache_date}|v2"
+    else:
+        news_key = f"{cache_date}|v2"
     # 检查缓存
     if os.path.exists(cache_file):
         try:

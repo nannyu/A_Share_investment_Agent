@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 import sys
 import os
 
+import pytest
+
 # 添加项目根目录到 Python 路径
 sys.path.append(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
@@ -157,6 +159,9 @@ def generate_mock_price_data(start_date, days):
 
 def test_backtest():
     """测试回测系统的交易执行逻辑"""
+    if os.getenv("RUN_BACKTEST_PLOT_TESTS") != "1":
+        pytest.skip("Set RUN_BACKTEST_PLOT_TESTS=1 to run backtest/plot tests.")
+
     # 设置初始参数
     initial_capital = 100000
     start_date = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')

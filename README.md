@@ -3,7 +3,7 @@
 # 🤖 AI 投资系统 🧠
 
 <img src="https://img.shields.io/badge/AI投资-决策辅助-4A90E2?style=for-the-badge">
-<img src="https://img.shields.io/badge/Python-Poetry-blue.svg?style=for-the-badge&logo=python&logoColor=white">
+<img src="https://img.shields.io/badge/Python-uv%20%7C%20Poetry-blue.svg?style=for-the-badge&logo=python&logoColor=white">
 <img src="https://img.shields.io/badge/LLM-Gemini%20%7C%20OpenAI%20Compatible-brightgreen?style=for-the-badge&logo=openai&logoColor=white">
 <img src="https://img.shields.io/badge/License-Dual%20(MIT%20%26%20GPLv3%2BNonCommercial)-lightgrey.svg?style=for-the-badge&logo=git&logoColor=white">
 
@@ -111,6 +111,35 @@
 git clone [https://github.com/24mlight/A_Share_investment_Agent.git](https://github.com/24mlight/A_Share_investment_Agent.git)
 cd A_Share_investment_Agent
 ```
+
+### 方式 A（推荐）：使用 uv 安装与运行
+
+本项目已支持 `uv`（更快的依赖解析/安装）。如果你已经安装了 `uv`，直接在项目根目录执行：
+
+```bash
+uv sync
+```
+
+如需安装开发依赖（pytest/black/isort/flake8）：
+
+```bash
+uv sync --group dev
+```
+
+运行 workflow：
+
+```bash
+uv run python src/main.py --ticker 000737 --show-reasoning
+```
+
+如果遇到下载超时（Windows 上偶发），可临时提高超时：
+
+```powershell
+$env:UV_HTTP_TIMEOUT="300"
+uv sync
+```
+
+### 方式 B：使用 Poetry 安装与运行（可选/兼容）
 
 ### 1. 安装 Poetry
 

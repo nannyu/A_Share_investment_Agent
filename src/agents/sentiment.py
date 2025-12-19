@@ -48,7 +48,12 @@ def sentiment_agent(state: AgentState):
     sentiment_score = None
     sentiment_error = None
     try:
-        sentiment_score = get_news_sentiment(recent_news, num_of_news=num_of_news)
+        sentiment_score = get_news_sentiment(
+            recent_news,
+            num_of_news=num_of_news,
+            symbol=symbol,
+            cache_date=end_date or datetime.now().strftime("%Y-%m-%d"),
+        )
         logger.debug(
             "Sentiment score for %s based on %d filtered news: %.4f",
             symbol,

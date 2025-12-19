@@ -299,7 +299,8 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
     if not from_cache:
         try:
             logger.info("📰 正在抓取指数新闻: %s", symbol)
-            news_df = get_stock_news(symbol)
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            news_df = get_stock_news(symbol, date=today_str)
             if news_df is None or news_df.empty:
                 summary_failed = True
                 logger.warning("⚠️ 未获取到任何宏观新闻，使用默认摘要。")
