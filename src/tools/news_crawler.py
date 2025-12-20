@@ -163,6 +163,24 @@ def _sort_news_items(items: list) -> list:
     return sorted(items, key=_key, reverse=True)
 
 
+def _extract_google_sites(query: str) -> tuple[str, list[str]]:
+    """Extract site filters from a Google-style query for Tavily include_domains."""
+    if not query:
+        return query, []
+    domains = re.findall(r"site:([\w\.-]+)", query)
+    cleaned = query
+    marker = " (site:"
+    if marker in query:
+        cleaned = query.split(marker, 1)[0].strip()
+    return cleaned, list(dict.fromkeys(domains))
+    for item in allowed:
+        if domain == item or domain.endswith('.' + item):
+            return True
+    return False
+
+
+
+
 cache = AkshareSQLiteCache(NEWS_CACHE_DB_PATH)
 
 
@@ -324,8 +342,12 @@ def get_stock_news(
     if not new_news_list and tavily_search:
         try:
             print("🧭 使用 Tavily 搜索获取新闻...")
-            print(f"🔍 搜索查询: {search_query}")
-            tavily_results = tavily_search(search_query, max_results=min(fetch_count, tavily_max_news))
+            tavily_query, _include_domains = _extract_google_sites(search_query)
+            print(f"🔍 搜索查询: {tavily_query}")
+            tavily_results = tavily_search(
+                tavily_query,
+                max_results=min(fetch_count, tavily_max_news),
+            )
             new_news_list = convert_tavily_results_to_news_format(tavily_results, symbol)
             if new_news_list:
                 fetch_method = "tavily"
@@ -336,7 +358,7 @@ def get_stock_news(
             print(f"⚠️ Tavily 搜索出错({e})，回退到 Google/akshare")
 
     # 次优先：Google（Playwright，可能被 /sorry 拦截）
-    if not new_news_list and google_search_sync and SearchOptions:
+    if not new_news_list and google_search_sync and SearchOptions and tavily_search is None:
         try:
             print("🌐 使用 Google 搜索获取新闻...")
             print(f"🔍 搜索查询: {search_query}")
