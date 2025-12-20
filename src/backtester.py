@@ -109,7 +109,7 @@ class Backtester:
 
         self._backtest_run_dir = run_dir
         log_file = os.path.join(run_dir, "backtest.log")
-        self._decision_log_path = os.path.join(run_dir, "llm_decisions.json")
+        self._decision_log_path = os.path.join(run_dir, "llm_decisions.jsonl")
 
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(logging.INFO)
@@ -125,6 +125,11 @@ class Backtester:
         self.backtest_logger.info(f"强制运行: {self.config.force_run}")
         self.backtest_logger.info("模式: workflow")
         self.backtest_logger.info("-" * 100)
+        try:
+            with open(self._decision_log_path, "w", encoding="utf-8") as f:
+                f.write("")
+        except Exception as exc:  # noqa: BLE001
+            self.backtest_logger.warning("初始化 LLM 决策 JSONL 失败: %s", exc)
 
     def _validate_inputs(self) -> None:
         start = datetime.strptime(self.config.start_date, "%Y-%m-%d")
@@ -191,6 +196,9 @@ class Backtester:
                     except Exception:
                         pass
 
+        trace_dir = os.path.join(self._backtest_run_dir, "trace", current_date)
+        os.makedirs(trace_dir, exist_ok=True)
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -203,21 +211,31 @@ class Backtester:
                     num_of_news=self.config.num_of_news,
                     run_id=f"backtest_{self.config.ticker}_{current_date.replace('-', '')}",
                     return_state=True,
+                    trace_dir=trace_dir,
                 )
-                payload = {"decision": {"action": "hold", "quantity": 0}, "analyst_signals": {}}
+                payload = {
+                    "decision": {"action": "hold", "quantity": 0},
+                    "analyst_signals": {},
+                    "raw_response": None,
+                }
                 if isinstance(result, dict):
                     meta = result.get("metadata", {}) if isinstance(result, dict) else {}
                     decision_details = meta.get("portfolio_management_agent_decision_details")
+                    raw_response = meta.get("agent_reasoning")
                     if isinstance(decision_details, dict) and decision_details.get("action"):
                         payload["decision"] = {
                             "action": decision_details.get("action"),
                             "quantity": decision_details.get("quantity", 0),
                         }
+                    if isinstance(raw_response, str) and raw_response.strip():
+                        payload["raw_response"] = raw_response
                     # fallback: parse last message JSON if present
                     try:
                         last_msg = result.get("messages", [])[-1]
                         last_content = getattr(last_msg, "content", None)
                         if last_content:
+                            if payload["raw_response"] is None:
+                                payload["raw_response"] = str(last_content)
                             parsed = json.loads(str(last_content))
                             if isinstance(parsed, dict) and parsed.get("action"):
                                 payload["decision"] = {
@@ -227,7 +245,11 @@ class Backtester:
                     except Exception:
                         pass
                 else:
-                    payload = {"decision": self._parse_decision_from_text(str(result)), "analyst_signals": {}}
+                    payload = {
+                        "decision": self._parse_decision_from_text(str(result)),
+                        "analyst_signals": {},
+                        "raw_response": str(result),
+                    }
 
                 if not self.config.force_run:
                     cache.upsert_records(
@@ -288,7 +310,6 @@ class Backtester:
             return
 
         self.logger.info("开始回测: %s (workflow)", self.config.ticker)
-        llm_decision_log: list[Dict[str, Any]] = []
         print(
             f"{'日期':<12} {'代码':<6} {'操作':<6} {'数量':>8} {'价格':>10} "
             f"{'成交额':>12} {'现金变动':>12} {'现金':>12} {'持仓':>8} {'总值':>14} {'日收益%':>10}"
@@ -371,14 +392,23 @@ class Backtester:
                 lookback_start = (current_date - timedelta(days=30)).strftime("%Y-%m-%d")
                 output = self._get_agent_decision(current_date_str, lookback_start)
                 last_decision = output.get("decision", last_decision) or last_decision
-                llm_decision_log.append(
-                    {
-                        "date": current_date_str,
-                        "ticker": self.config.ticker,
-                        "decision": dict(last_decision),
-                        "response": output,
-                    }
-                )
+                try:
+                    with open(self._decision_log_path, "a", encoding="utf-8") as f:
+                        f.write(
+                            json.dumps(
+                                {
+                                    "date": current_date_str,
+                                    "ticker": self.config.ticker,
+                                    "decision": dict(last_decision),
+                                    "response": output,
+                                    "raw_response": output.get("raw_response"),
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    self.backtest_logger.warning("写入 LLM 决策 JSONL 失败: %s", exc)
             action = str(last_decision.get("action", "hold") or "hold")
             quantity = int(last_decision.get("quantity", 0) or 0)
 
@@ -435,12 +465,6 @@ class Backtester:
                 {"Date": current_date, "Portfolio Value": total_value, "Daily Return": daily_return}
             )
 
-        if llm_decision_log:
-            try:
-                with open(self._decision_log_path, "w", encoding="utf-8") as f:
-                    json.dump(llm_decision_log, f, ensure_ascii=False, indent=2)
-            except Exception as exc:  # noqa: BLE001
-                self.backtest_logger.warning("写入 LLM 决策 JSON 失败: %s", exc)
 
     def analyze_performance(self) -> pd.DataFrame:
         performance_df = pd.DataFrame(self.portfolio_values).set_index("Date")

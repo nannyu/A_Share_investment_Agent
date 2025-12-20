@@ -54,7 +54,7 @@ logger = setup_logger('main_workflow')
 # --- Run the Hedge Fund Workflow ---
 
 
-def run_hedge_fund(run_id: str, ticker: str, start_date: str, end_date: str, portfolio: dict, show_reasoning: bool = False, num_of_news: int = 5, show_summary: bool = False, return_state: bool = False):
+def run_hedge_fund(run_id: str, ticker: str, start_date: str, end_date: str, portfolio: dict, show_reasoning: bool = False, num_of_news: int = 5, show_summary: bool = False, return_state: bool = False, trace_dir: str | None = None):
     print(f"--- Starting Workflow Run ID: {run_id} ---")
     initial_state = {
         "messages": [],  # 初始消息为空
@@ -69,6 +69,7 @@ def run_hedge_fund(run_id: str, ticker: str, start_date: str, end_date: str, por
             "show_reasoning": show_reasoning,
             "run_id": run_id,
             "show_summary": show_summary,
+            "trace_dir": trace_dir,
         }
     }
 

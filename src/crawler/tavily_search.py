@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -35,7 +36,14 @@ def tavily_search(
     - Returns structured results only; callers decide how to map/clean fields.
     """
     api_key = api_key or os.getenv("TAVILY_API_KEY", "").strip()
-    if not api_key:
+    keys_env = os.getenv("TAVILY_API_KEYS", "").strip()
+    keys: List[str] = []
+    if keys_env:
+        keys = [k for k in re.split(r"[;,\\s]+", keys_env) if k]
+    if api_key:
+        keys.append(api_key)
+    keys = [k.strip() for k in keys if k and k.strip()]
+    if not keys:
         return []
 
     payload: Dict[str, Any] = {
@@ -52,14 +60,25 @@ def tavily_search(
     if exclude_domains:
         payload["exclude_domains"] = exclude_domains
 
-    resp = requests.post(
-        "https://api.tavily.com/search",
-        headers={"Authorization": f"Bearer {api_key}"},
-        json=payload,
-        timeout=timeout_seconds,
-    )
-    resp.raise_for_status()
-    data = resp.json() or {}
+    data = {}
+    last_error: Optional[Exception] = None
+    for key in keys:
+        try:
+            resp = requests.post(
+                "https://api.tavily.com/search",
+                headers={"Authorization": f"Bearer {key}"},
+                json=payload,
+                timeout=timeout_seconds,
+            )
+            resp.raise_for_status()
+            data = resp.json() or {}
+            last_error = None
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            continue
+    if last_error is not None and not data:
+        return []
     raw_results = data.get("results") or []
 
     results: List[TavilyResult] = []
@@ -76,4 +95,3 @@ def tavily_search(
             )
         )
     return results
-

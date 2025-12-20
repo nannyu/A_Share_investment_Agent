@@ -44,6 +44,7 @@ from backend.utils.api_utils import (
 from backend.schemas import LLMInteractionLog  # Keep
 from backend.schemas import AgentExecutionLog  # Keep
 from src.utils.serialization import serialize_agent_state  # Keep
+from src.utils.trace_logger import trace_agent_io  # File-based trace for backtest
 
 # 导入日志记录器
 try:
@@ -168,12 +169,14 @@ def log_llm_interaction(state):
             # 从state中提取agent_name和run_id
             agent_name = None
             run_id = None
+            trace_dir = None
 
             # 尝试从state参数中提取
             if isinstance(state, dict):
                 agent_name = state.get("metadata", {}).get(
                     "current_agent_name")
                 run_id = state.get("metadata", {}).get("run_id")
+                trace_dir = state.get("metadata", {}).get("trace_dir")
 
             # 如果state中没有，尝试从上下文变量中获取
             if not agent_name:
@@ -223,6 +226,14 @@ def log_llm_interaction(state):
                     agent_name, "llm_response", formatted_response)
                 api_state.update_agent_data(
                     agent_name, "llm_timestamp", timestamp.isoformat())
+
+                # 文件级回测追踪（若提供 trace_dir）
+                if trace_dir:
+                    try:
+                        from src.utils.trace_logger import trace_llm_interaction
+                        trace_llm_interaction(trace_dir, agent_name, formatted_request, formatted_response)
+                    except Exception as trace_err:
+                        logger.warning(f"写入 LLM 追踪日志失败: {trace_err}")
 
                 # 同时保存到BaseLogStorage (解决/logs端点返回空问题)
                 try:
@@ -281,6 +292,7 @@ def agent_endpoint(agent_name: str, description: str = ""):
             serialized_input = serialize_agent_state(state)
             api_state.update_agent_data(
                 agent_name, "input_state", serialized_input)
+            trace_dir = state.get("metadata", {}).get("trace_dir")
 
             result = None
             error = None
@@ -339,6 +351,19 @@ def agent_endpoint(agent_name: str, description: str = ""):
                             "reasoning",
                             reasoning_details
                         )
+
+                if trace_dir:
+                    try:
+                        trace_agent_io(
+                            trace_dir,
+                            agent_name,
+                            serialized_input,
+                            serialized_output,
+                            terminal_outputs,
+                            reasoning_details,
+                        )
+                    except Exception as trace_err:
+                        logger.warning(f"写入 Agent 追踪日志失败: {trace_err}")
 
                 # 更新Agent状态为已完成
                 api_state.update_agent_state(agent_name, "completed")
