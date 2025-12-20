@@ -30,6 +30,11 @@ DEFAULT_CACHE_REFRESH: Dict[str, Dict[str, bool]] = {
     },
 }
 
+DEFAULT_NEWS_LIMITS: Dict[str, int] = {
+    "news_max_news": 100,
+    "tavily_max_news": 20,
+}
+
 
 def load_config() -> Dict[str, Any]:
     if not CONFIG_PATH.exists():
@@ -72,3 +77,12 @@ def get_cache_refresh_flag(agent_name: str, cache_key: str) -> bool:
     if isinstance(agent_cfg, dict):
         return bool(agent_cfg.get(cache_key, False))
     return bool(agent_cfg)
+
+
+def get_news_limits() -> Dict[str, int]:
+    config = load_config()
+    user_cfg = config.get("news_limits", {})
+    if not isinstance(user_cfg, dict):
+        user_cfg = {}
+    merged = _deep_merge(DEFAULT_NEWS_LIMITS, user_cfg)
+    return merged

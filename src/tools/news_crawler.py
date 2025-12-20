@@ -15,7 +15,7 @@ from pathlib import Path
 from src.database import AkshareSQLiteCache
 from src.tools.news_query_builder import build_news_query
 from src.utils.api_utils import log_llm_interaction
-from src.utils.config_loader import get_cache_refresh_flag
+from src.utils.config_loader import get_cache_refresh_flag, get_news_limits
 from src.utils.prompt_loader import load_prompt, format_prompt
 
 # 导入新的搜索模块
@@ -228,20 +228,26 @@ def get_stock_news(
               新闻来源通过智能搜索引擎获取，包含各大财经网站的相关报道。
     """
 
-    # 环境变量控制（全局上限 & Tavily 单次上限）
-    # - NEWS_MAX_NEWS: get_stock_news 的全局上限（默认 100）
-    # - TAVILY_MAX_NEWS: Tavily 每次最多拉取数量（默认 20）
+    # 配置控制（全局上限 & Tavily 单次上限）
+    # - config.json: news_limits.news_max_news / news_limits.tavily_max_news
+    # - env: NEWS_MAX_NEWS （可选覆盖）；Tavily 上限仅由 config 控制
+    limits = get_news_limits()
     try:
-        env_news_max = int(os.getenv("NEWS_MAX_NEWS", "100") or "100")
-    except ValueError:
-        env_news_max = 100
+        config_news_max = int(limits.get("news_max_news", 100))
+    except (TypeError, ValueError):
+        config_news_max = 100
     try:
-        tavily_max_news = int(os.getenv("TAVILY_MAX_NEWS", "20") or "20")
+        config_tavily_max = int(limits.get("tavily_max_news", 20))
+    except (TypeError, ValueError):
+        config_tavily_max = 20
+
+    try:
+        env_news_max = int(os.getenv("NEWS_MAX_NEWS", "") or config_news_max)
     except ValueError:
-        tavily_max_news = 20
+        env_news_max = config_news_max
 
     env_news_max = max(1, min(env_news_max, 100))
-    tavily_max_news = max(1, min(tavily_max_news, 20))
+    tavily_max_news = max(1, min(config_tavily_max, 20))
 
     # 限制最大新闻条数
     max_news = min(max_news, env_news_max)
