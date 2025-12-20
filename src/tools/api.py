@@ -10,6 +10,7 @@ from src.tools.akshare_cache import (
     get_price_history_df,
 )
 from src.tools.market_snapshot import get_market_snapshot
+from src.utils.config_loader import get_cache_refresh_flag
 
 # 设置日志记录
 logger = setup_logger('api')
@@ -40,11 +41,13 @@ def _default_agent_metrics() -> Dict[str, float]:
 def get_financial_metrics(symbol: str, *, trace_state: dict | None = None) -> Dict[str, Any]:
     """获取财务指标数据"""
     logger.info(f"Getting financial indicators for {symbol}...")
+    refresh_financial_indicators = get_cache_refresh_flag("market_data_agent", "financial_indicators")
+    refresh_financial_reports = get_cache_refresh_flag("market_data_agent", "financial_reports")
     try:
         # ��ȡʵʱ�������ݣ�������ֵ�͹�ֵ���ʣ�
         logger.info("Fetching market snapshot...")
         try:
-            snapshot = get_market_snapshot(symbol, trace_state=trace_state)
+            snapshot = get_market_snapshot(symbol, trace_state=trace_state, agent_name="market_data_agent")
             logger.info("✓ Market snapshot prepared")
         except Exception as snapshot_err:  # noqa: BLE001
             logger.warning("Market snapshot unavailable: %s", snapshot_err)
@@ -57,7 +60,7 @@ def get_financial_metrics(symbol: str, *, trace_state: dict | None = None) -> Di
         logger.info("Fetching Sina financial indicators...")
         current_year = datetime.now().year
         financial_data = get_financial_indicators(
-            symbol=symbol, start_year=str(current_year-1))
+            symbol=symbol, start_year=str(current_year-1), force_refresh=refresh_financial_indicators)
         if financial_data is None or financial_data.empty:
             logger.warning("No financial indicator data available, using defaults.")
             return [_default_agent_metrics()]
@@ -74,7 +77,7 @@ def get_financial_metrics(symbol: str, *, trace_state: dict | None = None) -> Di
         # 获取利润表数据（用于计算 price_to_sales）
         logger.info("Fetching income statement...")
         try:
-            income_statement = get_financial_report(symbol, REPORT_INCOME_STATEMENT)
+            income_statement = get_financial_report(symbol, REPORT_INCOME_STATEMENT, force_refresh=refresh_financial_reports)
             if not income_statement.empty:
                 latest_income = income_statement.iloc[0]
                 logger.info("✓ Income statement fetched")
@@ -202,11 +205,12 @@ def get_financial_metrics(symbol: str, *, trace_state: dict | None = None) -> Di
 def get_financial_statements(symbol: str) -> Dict[str, Any]:
     """获取财务报表数据"""
     logger.info(f"Getting financial statements for {symbol}...")
+    refresh_financial_reports = get_cache_refresh_flag("market_data_agent", "financial_reports")
     try:
         # 获取资产负债表数据
         logger.info("Fetching balance sheet...")
         try:
-            balance_sheet = get_financial_report(symbol, REPORT_BALANCE_SHEET)
+            balance_sheet = get_financial_report(symbol, REPORT_BALANCE_SHEET, force_refresh=refresh_financial_reports)
             if not balance_sheet.empty:
                 latest_balance = balance_sheet.iloc[0]
                 previous_balance = balance_sheet.iloc[1] if len(
@@ -226,7 +230,7 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         # 获取利润表数据
         logger.info("Fetching income statement...")
         try:
-            income_statement = get_financial_report(symbol, REPORT_INCOME_STATEMENT)
+            income_statement = get_financial_report(symbol, REPORT_INCOME_STATEMENT, force_refresh=refresh_financial_reports)
             if not income_statement.empty:
                 latest_income = income_statement.iloc[0]
                 previous_income = income_statement.iloc[1] if len(
@@ -246,7 +250,7 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         # 获取现金流量表数据
         logger.info("Fetching cash flow statement...")
         try:
-            cash_flow = get_financial_report(symbol, REPORT_CASH_FLOW)
+            cash_flow = get_financial_report(symbol, REPORT_CASH_FLOW, force_refresh=refresh_financial_reports)
             if not cash_flow.empty:
                 latest_cash_flow = cash_flow.iloc[0]
                 previous_cash_flow = cash_flow.iloc[1] if len(
@@ -352,7 +356,7 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
 def get_market_data(symbol: str, *, trace_state: dict | None = None) -> Dict[str, Any]:
     """获取市场数据（自研引擎 + LLM 快照）"""
     try:
-        snapshot = get_market_snapshot(symbol, trace_state=trace_state)
+        snapshot = get_market_snapshot(symbol, trace_state=trace_state, agent_name="market_data_agent")
         return {
             "market_cap": snapshot.get("market_cap", 0.0),
             "volume": snapshot.get("volume", 0.0),
@@ -431,12 +435,14 @@ def get_price_history(symbol: str, start_date: str = None, end_date: str = None,
         logger.info(f"End date: {end_date.strftime('%Y-%m-%d')}")
 
         def get_and_process_data(start_date, end_date):
+            refresh_price_history = get_cache_refresh_flag("market_data_agent", "price_history")
             """获取并处理数据，包括重命名列等操作"""
             df = get_price_history_df(
                 symbol=symbol,
                 start_date=start_date,
                 end_date=end_date,
                 adjust=adjust,
+                force_refresh=refresh_price_history,
             )
 
             if df is None or df.empty:

@@ -110,17 +110,21 @@ def get_stock_spot_row(symbol: str, ttl_seconds: int = 600) -> Optional[pd.Serie
 
 
 def get_financial_indicators(
-    symbol: str, start_year: str, ttl_seconds: int = 24 * 3600
+    symbol: str, start_year: str, ttl_seconds: int = 24 * 3600, force_refresh: bool = False
 ) -> pd.DataFrame:
-    cached = cache.fetch_records(
-        table="stock_financial_analysis_indicator",
-        filters={COL_CODE: symbol},
-        ttl_seconds=ttl_seconds,
-        order_by=f'"{COL_DATE}" DESC',
-    )
-    if cached:
-        _log_cache_hit("stock_financial_analysis_indicator", symbol, len(cached))
-        return _records_to_df(cached)
+    if force_refresh:
+        logger.info("🔄 强制刷新财务指标缓存: %s", symbol)
+
+    if not force_refresh:
+        cached = cache.fetch_records(
+            table="stock_financial_analysis_indicator",
+            filters={COL_CODE: symbol},
+            ttl_seconds=ttl_seconds,
+            order_by=f'"{COL_DATE}" DESC',
+        )
+        if cached:
+            _log_cache_hit("stock_financial_analysis_indicator", symbol, len(cached))
+            return _records_to_df(cached)
 
     df = _call_with_retry(
         lambda: ak.stock_financial_analysis_indicator(symbol=symbol, start_year=start_year),
@@ -143,16 +147,20 @@ def get_financial_indicators(
 
 
 def get_financial_report(
-    symbol: str, report_type: str, ttl_seconds: int = 7 * 24 * 3600
+    symbol: str, report_type: str, ttl_seconds: int = 7 * 24 * 3600, force_refresh: bool = False
 ) -> pd.DataFrame:
-    cached = cache.fetch_records(
-        table="stock_financial_report_sina",
-        filters={COL_CODE: symbol, COL_REPORT_TYPE: report_type},
-        ttl_seconds=ttl_seconds,
-    )
-    if cached:
-        _log_cache_hit(f"stock_financial_report_sina[{report_type}]", symbol, len(cached))
-        return _records_to_df(cached)
+    if force_refresh:
+        logger.info("🔄 强制刷新财务报表缓存: %s %s", symbol, report_type)
+
+    if not force_refresh:
+        cached = cache.fetch_records(
+            table="stock_financial_report_sina",
+            filters={COL_CODE: symbol, COL_REPORT_TYPE: report_type},
+            ttl_seconds=ttl_seconds,
+        )
+        if cached:
+            _log_cache_hit(f"stock_financial_report_sina[{report_type}]", symbol, len(cached))
+            return _records_to_df(cached)
 
     exchange_symbol = _resolve_exchange_symbol(symbol)
     df = _call_with_retry(
@@ -263,9 +271,13 @@ def get_price_history_df(
     end_date: datetime,
     adjust: str = "qfq",
     ttl_seconds: Optional[int] = None,  # kept for backward compatibility, unused
+    force_refresh: bool = False,
 ) -> pd.DataFrame:
+    if force_refresh:
+        logger.info("🔄 强制刷新历史K线缓存: %s", symbol)
+
     filters = {"symbol": symbol, "adjust_flag": adjust or ""}
-    cached_records = cache.fetch_records(
+    cached_records = [] if force_refresh else cache.fetch_records(
         table=HISTORY_TABLE,
         filters=filters,
         order_by='"date" ASC',
@@ -334,6 +346,7 @@ def get_stock_news(
     *,
     date: Optional[str] = None,
     ttl_seconds: int = 2 * 3600,
+    force_refresh: bool = False,
 ) -> pd.DataFrame:
     """
     获取新闻并缓存到 SQLite。
@@ -346,15 +359,19 @@ def get_stock_news(
     date_str = _normalize_date_str(date or today_str)
     effective_ttl = ttl_seconds if date is None or date_str == today_str else None
 
-    cached = cache.fetch_records(
-        table="stock_news_em",
-        filters={COL_KEYWORD: symbol, COL_CACHE_DATE: date_str},
-        ttl_seconds=effective_ttl,
-        order_by=f'"{COL_PUBLISH_TIME}" DESC',
-    )
-    if cached:
-        _log_cache_hit("stock_news_em", symbol, len(cached))
-        return _records_to_df(cached)
+    if force_refresh:
+        logger.info("🔄 强制刷新新闻缓存(stock_news_em): %s %s", symbol, date_str)
+
+    if not force_refresh:
+        cached = cache.fetch_records(
+            table="stock_news_em",
+            filters={COL_KEYWORD: symbol, COL_CACHE_DATE: date_str},
+            ttl_seconds=effective_ttl,
+            order_by=f'"{COL_PUBLISH_TIME}" DESC',
+        )
+        if cached:
+            _log_cache_hit("stock_news_em", symbol, len(cached))
+            return _records_to_df(cached)
 
     df = _call_with_retry(lambda: ak.stock_news_em(symbol=symbol), "stock_news_em")
     if df is None:

@@ -12,6 +12,7 @@ from src.tools.openrouter_config import get_chat_completion
 from src.utils.logging_config import setup_logger
 from src.utils.api_utils import log_llm_interaction
 from src.utils.prompt_loader import load_prompt, format_prompt
+from src.utils.config_loader import get_cache_refresh_flag
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 CACHE_PATH = BASE_DIR / "data" / "market_data_cache.db"
@@ -162,18 +163,26 @@ def get_market_snapshot(
     ttl_seconds: int = SNAPSHOT_TTL_SECONDS,
     *,
     trace_state: dict | None = None,
+    agent_name: str | None = None,
 ) -> Dict[str, Any]:
-    cached = cache.fetch_records(
-        table=SNAPSHOT_TABLE,
-        filters={"symbol": symbol},
-        ttl_seconds=ttl_seconds,
-        order_by='"缓存时间" DESC',
-        limit=1,
-    )
-    if cached:
-        record = _records_to_dict(cached[0])
-        logger.info("📦 Market snapshot cache hit for %s", symbol)
-        return record
+    refresh_snapshot = get_cache_refresh_flag(agent_name or "market_snapshot", "snapshot")
+    if refresh_snapshot:
+        logger.info("🔄 强制刷新市场快照缓存: %s", symbol)
+
+    cache_date = datetime.now().strftime("%Y-%m-%d")
+
+    if not refresh_snapshot:
+        cached = cache.fetch_records(
+            table=SNAPSHOT_TABLE,
+            filters={"symbol": symbol, "cache_date": cache_date},
+            ttl_seconds=ttl_seconds,
+            order_by='"缓存时间" DESC',
+            limit=1,
+        )
+        if cached:
+            record = _records_to_dict(cached[0])
+            logger.info("?? Market snapshot cache hit for %s (%s)", symbol, cache_date)
+            return record
 
     snapshot = _generate_snapshot(symbol, trace_state=trace_state)
     record = {"symbol": symbol, **snapshot}

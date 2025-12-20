@@ -12,7 +12,7 @@ from __future__ import annotations
 # --plot             展示图表（可选，可能阻塞）
 # --save-plot         保存图表路径（可选，不填则保存至 logs/backtest_* 目录）
 # 配置项:
-# config.json -> backtest.force_run=true 时，禁用回测决策缓存并在日志目录后添加 _forceN
+# config.json -> backtest.force_run=true 时，在日志目录后添加 _forceN
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -26,8 +26,6 @@ import sys
 import pandas as pd
 
 from src.tools.api import get_price_data
-from src.database import AkshareSQLiteCache
-from src.tools.akshare_cache import CACHE_PATH
 
 
 # 统一控制台编码，避免 Windows 下 emoji/中文导致的 gbk 编码异常
@@ -180,22 +178,6 @@ class Backtester:
         if self.agent is None:
             return {"decision": {"action": "hold", "quantity": 0}, "analyst_signals": {}}
 
-        cache = AkshareSQLiteCache(CACHE_PATH)
-        cache_key = f"backtest_decision|{self.config.ticker}|{current_date}"
-        if not self.config.force_run:
-            cached_rows = cache.fetch_records(
-                table="backtest_decision_cache",
-                filters={"cache_key": cache_key},
-                limit=1,
-            )
-            if cached_rows:
-                cached_val = cached_rows[0].get("result")
-                if cached_val:
-                    try:
-                        return json.loads(cached_val)
-                    except Exception:
-                        pass
-
         trace_dir = os.path.join(self._backtest_run_dir, "trace", current_date)
         os.makedirs(trace_dir, exist_ok=True)
 
@@ -251,17 +233,6 @@ class Backtester:
                         "raw_response": str(result),
                     }
 
-                if not self.config.force_run:
-                    cache.upsert_records(
-                        table="backtest_decision_cache",
-                        records=[
-                            {
-                                "cache_key": cache_key,
-                                "result": json.dumps(payload, ensure_ascii=False),
-                            }
-                        ],
-                        key_columns=["cache_key"],
-                    )
                 return payload
             except Exception as e:  # noqa: BLE001
                 self.logger.warning("获取智能体决策失败(尝试 %s/%s): %s", attempt + 1, max_retries, e)

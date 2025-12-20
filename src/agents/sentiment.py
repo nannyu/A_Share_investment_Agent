@@ -60,6 +60,7 @@ def sentiment_agent(state: AgentState):
             symbol=symbol,
             cache_date=end_date or datetime.now().strftime("%Y-%m-%d"),
             trace_state=state,
+            agent_name="sentiment_agent",
         )
         logger.debug(
             "Sentiment score for %s based on %d filtered news: %.4f",

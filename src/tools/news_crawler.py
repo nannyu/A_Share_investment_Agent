@@ -15,6 +15,7 @@ from pathlib import Path
 from src.database import AkshareSQLiteCache
 from src.tools.news_query_builder import build_news_query
 from src.utils.api_utils import log_llm_interaction
+from src.utils.config_loader import get_cache_refresh_flag
 from src.utils.prompt_loader import load_prompt, format_prompt
 
 # 导入新的搜索模块
@@ -165,10 +166,10 @@ def _sort_news_items(items: list) -> list:
 cache = AkshareSQLiteCache(NEWS_CACHE_DB_PATH)
 
 
-def get_stock_news_via_akshare(symbol: str, max_news: int = 10, *, cache_date: str | None = None) -> list:
+def get_stock_news_via_akshare(symbol: str, max_news: int = 10, *, cache_date: str | None = None, refresh_cache: bool = False) -> list:
     """使用缓存增强的 AkShare 新闻接口"""
     try:
-        news_df = get_stock_news_akshare_cached(symbol, date=cache_date)
+        news_df = get_stock_news_akshare_cached(symbol, date=cache_date, force_refresh=refresh_cache)
         if news_df is None or news_df.empty:
             print(f"⚠️ 未获取到 {symbol} 的新闻数据")
             return []
@@ -247,28 +248,35 @@ def get_stock_news(
 
     cache_date = _normalize_date_str(date)
 
-    # 先查 SQLite 缓存：key=股票+日期（避免跨标的/跨日期误命中）
-    cached_records = cache.fetch_records(
-        NEWS_CACHE_TABLE,
-        filters={"symbol": symbol, "cache_date": cache_date},
-        order_by='"publish_time" DESC, "search_time" DESC',
-        limit=max_news,
-    )
+    refresh_news = False
+    if agent_name:
+        refresh_news = get_cache_refresh_flag(agent_name, "news")
+    if refresh_news:
+        print(f"🔄 强制刷新新闻缓存: {agent_name} {symbol} {cache_date}")
+
     cached_news = []
-    for r in cached_records:
-        r = dict(r)
-        r.pop("缓存时间", None)
-        cached_news.append(
-            {
-                "title": r.get("title", ""),
-                "content": r.get("content", ""),
-                "source": r.get("source", ""),
-                "url": r.get("url", ""),
-                "keyword": symbol,
-                "publish_time": r.get("publish_time") or "",
-                "search_time": r.get("search_time") or "",
-            }
+    if not refresh_news:
+        # 先查 SQLite 缓存：key=股票+日期（避免跨标的/跨日期误命中）
+        cached_records = cache.fetch_records(
+            NEWS_CACHE_TABLE,
+            filters={"symbol": symbol, "cache_date": cache_date},
+            order_by='"publish_time" DESC, "search_time" DESC',
+            limit=max_news,
         )
+        for r in cached_records:
+            r = dict(r)
+            r.pop("缓存时间", None)
+            cached_news.append(
+                {
+                    "title": r.get("title", ""),
+                    "content": r.get("content", ""),
+                    "source": r.get("source", ""),
+                    "url": r.get("url", ""),
+                    "keyword": symbol,
+                    "publish_time": r.get("publish_time") or "",
+                    "search_time": r.get("search_time") or "",
+                }
+            )
 
     if len(cached_news) >= max_news:
         print(f"📦 DB 缓存命中: {symbol} {cache_date}（{len(cached_news)} 条）")
@@ -291,7 +299,17 @@ def get_stock_news(
     # 优先：Tavily（需要配置 TAVILY_API_KEY；比直接爬 Google 更稳定）
     new_news_list = []
     fetch_method = None
-    if tavily_search:
+    # macro_news_agent 优先使用 AkShare（000300 指数新闻）
+    if agent_name == "macro_news_agent":
+        print("🧭 macro_news_agent 优先使用 akshare 获取指数新闻...")
+        new_news_list = get_stock_news_via_akshare(symbol, fetch_count, cache_date=cache_date, refresh_cache=refresh_news)
+        if new_news_list:
+            fetch_method = "akshare"
+            print(f"✅ akshare 获取 {len(new_news_list)} 条新闻")
+        else:
+            print("⚠️ akshare 返回 0 条，回退到 Tavily/Google")
+
+    if not new_news_list and tavily_search:
         try:
             print("🧭 使用 Tavily 搜索获取新闻...")
             print(f"🔍 搜索查询: {search_query}")
@@ -346,6 +364,7 @@ def get_stock_news(
                 symbol,
                 max(need_more_news - len(new_news_list), 0),
                 cache_date=cache_date,
+                refresh_cache=refresh_news,
             )
             if more:
                 existing_titles = {news.get("title", "") for news in new_news_list}
@@ -445,6 +464,7 @@ def get_news_sentiment(
     symbol: str | None = None,
     cache_date: str | None = None,
     trace_state: dict | None = None,
+    agent_name: str | None = None,
 ) -> float:
     """分析新闻情感得分
 
@@ -462,26 +482,7 @@ def get_news_sentiment(
     # project_root = os.path.dirname(os.path.dirname(
     #     os.path.dirname(os.path.abspath(__file__))))
 
-    # 缓存 Key 规则（按“股票 + 日期 + 数量”）：避免用新闻内容做 key
-    if not cache_date:
-        cache_date = datetime.now().strftime("%Y-%m-%d")
-    if symbol:
-        cache_key = f"sentiment|{symbol}|{cache_date}|n={int(num_of_news)}"
-    else:
-        cache_key = f"sentiment|{cache_date}|n={int(num_of_news)}"
-
-    cache = AkshareSQLiteCache(CACHE_PATH)
-    cached_rows = cache.fetch_records(
-        table="llm_result_cache",
-        filters={"cache_key": cache_key},
-        limit=1,
-    )
-    if cached_rows:
-        cached_val = cached_rows[0].get("result")
-        try:
-            return float(cached_val)
-        except Exception:
-            pass
+    # 情绪结果不缓存：每次基于最新新闻重新评估
 
     # 准备系统消息
     system_message = {
@@ -548,20 +549,6 @@ def get_news_sentiment(
         # 确保在-1到1之间
 
         sentiment_score = max(-1.0, min(1.0, sentiment_score))
-
-
-
-        cache.upsert_records(
-            table="llm_result_cache",
-            records=[
-                {
-                    "cache_key": cache_key,
-                    "cache_type": "sentiment",
-                    "result": float(sentiment_score),
-                }
-            ],
-            key_columns=["cache_key"],
-        )
 
 
 

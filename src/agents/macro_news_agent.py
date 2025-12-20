@@ -1,5 +1,4 @@
 import json
-import os
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -11,13 +10,14 @@ from src.tools.news_crawler import get_stock_news
 from src.tools.openrouter_config import get_chat_completion
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
 from src.utils.prompt_loader import load_prompt
+from src.utils.config_loader import get_cache_refresh_flag
+from src.database import AkshareSQLiteCache
+from src.tools.akshare_cache import CACHE_PATH
 from src.utils.logging_config import setup_logger
 
 MACRO_INDEX_NAME = "沪深300指数"
 DEFAULT_SUMMARY_TEXT = "宏观新闻分析不可用或尚未生成。"
 ERROR_SUMMARY_TEXT = "宏观新闻分析过程中发生错误"
-MACRO_SUMMARY_PATH = os.path.join("src", "data", "macro_summary.json")
-
 LLM_PROMPT_MACRO_ANALYSIS = load_prompt("prompts/macro_news_agent/prompt.md")
 
 
@@ -215,42 +215,41 @@ def _format_prompt_payload(news_items: List[Dict[str, str]]) -> str:
 def macro_news_agent(state: AgentState) -> Dict[str, Any]:
     agent_name = "macro_news_agent"
     show_workflow_status(f"{agent_name}: --- Executing Macro News Agent ---")
-
     symbol = "000300"
     today_str = datetime.now().strftime("%Y-%m-%d")
-    output_file_path = MACRO_SUMMARY_PATH
 
     summary_failed = False
     from_cache = False
     retrieved_news_count = 0
     analysis_payload: Optional[Dict[str, Any]] = None
-    all_summaries: Dict[str, Any] = {}
 
-    if os.path.exists(output_file_path):
-        logger.info("📁 尝试加载宏观新闻缓存文件: %s", output_file_path)
-        try:
-            with open(output_file_path, "r", encoding="utf-8") as f:
-                all_summaries = json.load(f)
-            cached_entry = all_summaries.get(today_str)
-            if cached_entry and cached_entry.get("summary_content"):
-                cached_status = cached_entry.get("status", "ok")
-                cached_analysis = cached_entry.get("analysis")
-                invalid_cache = cached_status == "error" or not isinstance(cached_analysis, dict)
-                if invalid_cache:
-                    logger.warning("⚠️ 检测到无效宏观缓存（status=%s），准备重新生成", cached_status)
-                    show_workflow_status(f"{agent_name}: 缓存中的 {today_str} 宏观摘要无效，尝试重新生成。")
-                else:
+    refresh_summary = get_cache_refresh_flag("macro_news_agent", "summary")
+    if refresh_summary:
+        logger.info("🔄 强制刷新宏观摘要缓存: %s", today_str)
+
+    cache_key = f"macro_news_summary|{symbol}|{today_str}"
+    cache = AkshareSQLiteCache(CACHE_PATH)
+    if not refresh_summary:
+        cached_rows = cache.fetch_records(
+            table="llm_result_cache",
+            filters={"cache_key": cache_key},
+            limit=1,
+        )
+        if cached_rows:
+            cached_val = cached_rows[0].get("result")
+            if cached_val:
+                try:
+                    analysis_payload = json.loads(cached_val)
                     analysis_payload = {
-                        **cached_analysis,
-                        "news_count": cached_analysis.get("news_count", cached_entry.get("retrieved_news_count", 0)),
+                        **analysis_payload,
                         "from_cache": True,
-                        "generated_on": cached_analysis.get("generated_on", today_str),
+                        "generated_on": analysis_payload.get("generated_on", today_str),
                     }
                     retrieved_news_count = analysis_payload.get("news_count", 0)
                     from_cache = True
                     logger.info(
-                        "📦 宏观新闻使用缓存: %s (news=%d)",
-                        output_file_path,
+                        "📦 宏观新闻使用缓存: cache_key=%s (news=%d)",
+                        cache_key,
                         retrieved_news_count,
                     )
                     show_workflow_status(f"{agent_name}: 从缓存加载 {today_str} 的宏观新闻总结。")
@@ -258,114 +257,29 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
                         analysis_payload,
                         "Macro News Agent (cached)",
                     )
-        except json.JSONDecodeError:
-            all_summaries = {}
-            logger.error("❌ 宏观缓存 JSON 解码失败，忽略缓存文件。")
-            show_agent_reasoning(
-                {"error": "macro_summary.json decode error"},
-                "Macro News Agent Cache",
-            )
-        except Exception as exc:
-            all_summaries = {}
-            logger.exception("❌ 读取宏观缓存文件异常: %s", exc)
-            show_agent_reasoning(
-                {"error": f"Failed to load macro summary cache: {exc}"},
-                "Macro News Agent Cache",
-            )
+                except Exception as exc:
+                    logger.warning("⚠️ 宏观摘要缓存解析失败，准备重新生成: %s", exc)
+                    analysis_payload = None
 
     news_items: List[Dict[str, str]] = []
-
     if not from_cache:
-        try:
-            logger.info("📰 正在抓取指数新闻: %s", symbol)
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            news_raw = get_stock_news(
-                symbol,
-                max_news=100,
-                date=today_str,
-                agent_name="macro_news_agent",
-                trace_state=state,
-            )
-            if not news_raw:
-                summary_failed = True
-                logger.warning("?? 未获取到任何宏观新闻，使用默认摘要。")
-                analysis_payload = _default_macro_payload("未获取到相关宏观新闻数据。", 0, False, today_str)
-            else:
-                if isinstance(news_raw, list):
-                    retrieved_news_count = len(news_raw)
-                    logger.info("? 成功获取宏观新闻 %d 条", retrieved_news_count)
-                    show_workflow_status(f"{agent_name}: 成功获取 {retrieved_news_count} 条新闻")
-                    for item in news_raw:
-                        news_items.append({
-                            "title": str(item.get("title") or "").strip(),
-                            "content": str(item.get("content") or item.get("title") or "").strip(),
-                            "publish_time": str(item.get("publish_time") or item.get("search_time") or "").strip(),
-                        })
-                else:
-                    news_df = news_raw
-                    if news_df is None or getattr(news_df, "empty", False):
-                        summary_failed = True
-                        logger.warning("?? 未获取到任何宏观新闻，使用默认摘要。")
-                        analysis_payload = _default_macro_payload("未获取到相关宏观新闻数据。", 0, False, today_str)
-                    else:
-                        retrieved_news_count = len(news_df)
-                        logger.info("? 成功获取宏观新闻 %d 条", retrieved_news_count)
-                        show_workflow_status(
-                            f"{agent_name}: 成功获取 {retrieved_news_count} 条新闻")
-                        for _, row in news_df.iterrows():
-                            row_dict = row.to_dict()
-                            news_items.append({
-                                "title": str(row_dict.get("新闻标题") or row_dict.get("title") or "").strip(),
-                                "content": str(row_dict.get("新闻内容") or row_dict.get("content") or "").strip(),
-                                "publish_time": str(row_dict.get("发布时间") or row_dict.get("publish_time") or "").strip(),
-                            })
-                news_json = _format_prompt_payload(news_items)
-                prompt_text = LLM_PROMPT_MACRO_ANALYSIS.replace("<<NEWS_JSON>>", news_json)
-                logger.info("🤖 调用 LLM 生成宏观摘要 (news=%d)", retrieved_news_count)
-                llm_response = log_llm_interaction(state)(
-                    lambda: get_chat_completion(
-                        [{"role": "user", "content": prompt_text}]
-                    )
-                )()
-                if not llm_response:
-                    raise ValueError("LLM returned empty response for macro news analysis.")
-                analysis_payload = _payload_from_llm(llm_response, retrieved_news_count, False, today_str)
-                logger.info("✅ LLM 宏观摘要生成完成 (news=%d)", retrieved_news_count)
-                show_agent_reasoning(analysis_payload, "Macro News Agent (LLM)")
-        except Exception as exc:
-            summary_failed = True
-            analysis_payload = _default_macro_payload(f"{ERROR_SUMMARY_TEXT}: {exc}", retrieved_news_count, False, today_str)
-            logger.exception("Macro news agent failed during LLM workflow.")
-            show_agent_reasoning({"error": str(exc)}, "Macro News Agent Error")
-            logger.warning("⚠️ 宏观新闻降级为默认摘要: %s", exc)
-
-    if analysis_payload is None:
-        analysis_payload = _default_macro_payload(DEFAULT_SUMMARY_TEXT, retrieved_news_count, from_cache, today_str)
-    else:
-        analysis_payload["from_cache"] = from_cache
-        analysis_payload["news_count"] = analysis_payload.get("news_count", retrieved_news_count)
-        analysis_payload.setdefault("generated_on", today_str)
-
-    summary_text = analysis_payload.get("summary", DEFAULT_SUMMARY_TEXT)
-
-    if not from_cache:
-        entry = {
-            "summary_content": summary_text,
-            "analysis": analysis_payload,
-            "retrieved_news_count": analysis_payload.get("news_count", 0),
-            "last_updated": datetime.now().isoformat(),
-            "status": "error" if summary_failed else "ok",
-        }
-        all_summaries[today_str] = entry
-        os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
-        with open(output_file_path, 'w', encoding='utf-8') as f:
-            json.dump(all_summaries, f, ensure_ascii=False, indent=4)
-        show_workflow_status(f"{agent_name}: 已将宏观总结保存至 {output_file_path}")
+        cache.upsert_records(
+            table="llm_result_cache",
+            records=[
+                {
+                    "cache_key": cache_key,
+                    "cache_type": "macro_news_summary",
+                    "result": json.dumps(analysis_payload, ensure_ascii=False),
+                }
+            ],
+            key_columns=["cache_key"],
+        )
+        show_workflow_status(f"{agent_name}: 已将宏观总结保存至 SQLite 缓存")
         logger.info(
-            "💾 宏观摘要写入 %s（news=%d，status=%s）",
-            output_file_path,
-            entry["retrieved_news_count"],
-            entry["status"],
+            "📦 宏观摘要写入 SQLite（cache_key=%s，news=%d，status=%s）",
+            cache_key,
+            analysis_payload.get("news_count", 0),
+            "error" if summary_failed else "ok",
         )
     else:
         logger.info(

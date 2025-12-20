@@ -7,8 +7,6 @@ import json
 from datetime import datetime, timedelta
 from src.tools.openrouter_config import get_chat_completion
 from src.utils.prompt_loader import load_prompt, format_prompt
-from src.database import AkshareSQLiteCache
-from src.tools.akshare_cache import CACHE_PATH
 
 # 设置日志记录
 logger = setup_logger('macro_analyst_agent')
@@ -127,30 +125,6 @@ def get_macro_news_analysis(
             "key_factors": [],
             "reasoning": "没有足够的新闻数据进行宏观分析"
         }
-
-    # 缓存 Key 规则（按“股票 + 日期 + v2”）：不要用新闻内容作为 key
-    if not cache_date:
-        cache_date = datetime.now().strftime("%Y-%m-%d")
-    if symbol:
-        cache_key = f"macro_analysis|{symbol}|{cache_date}"
-    else:
-        cache_key = f"macro_analysis|{cache_date}"
-
-    cache = AkshareSQLiteCache(CACHE_PATH)
-    cached_rows = cache.fetch_records(
-        table="llm_result_cache",
-        filters={"cache_key": cache_key},
-        limit=1,
-    )
-    if cached_rows:
-        cached_val = cached_rows[0].get("result")
-        if cached_val:
-            try:
-                logger.info("📦 使用缓存的宏观分析结果")
-                return json.loads(cached_val)
-            except Exception:
-                pass
-
     # 准备系统消息
     system_message = {
         "role": "system",
@@ -226,21 +200,6 @@ def get_macro_news_analysis(
                     "key_factors": [],
                     "reasoning": "LLM未返回有效的JSON格式结果"
                 }
-
-        # 缓存结果
-        cache.upsert_records(
-            table="llm_result_cache",
-            records=[
-                {
-                    "cache_key": cache_key,
-                    "cache_type": "macro_analysis",
-                    "result": json.dumps(analysis_result, ensure_ascii=False),
-                }
-            ],
-            key_columns=["cache_key"],
-        )
-        logger.info("💾 宏观分析结果已缓存")
-
         return analysis_result
 
     except Exception as e:
