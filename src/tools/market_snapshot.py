@@ -11,7 +11,7 @@ from src.tools.news_crawler import get_stock_news
 from src.tools.openrouter_config import get_chat_completion
 from src.utils.logging_config import setup_logger
 from src.utils.api_utils import log_llm_interaction
-from src.utils.prompt_loader import load_prompt
+from src.utils.prompt_loader import load_prompt, format_prompt
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 CACHE_PATH = BASE_DIR / "data" / "market_data_cache.db"
@@ -37,10 +37,10 @@ def _build_prompt(symbol: str, news_items: List[Dict[str, str]]) -> List[Dict[st
         news_block = "\n\n".join(lines)
 
     system_message = load_prompt("prompts/market_snapshot/system.md")
-    user_message = (
-        f"股票代码：{symbol}\n"
-        f"新闻要点：\n{news_block}\n\n"
-        "请严格返回一个JSON字符串，不要包含额外文本。"
+    user_message = format_prompt(
+        "prompts/market_snapshot/user.md",
+        symbol=symbol,
+        news_block=news_block,
     )
     return [
         {"role": "system", "content": system_message},
