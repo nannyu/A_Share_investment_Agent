@@ -23,7 +23,13 @@ def sentiment_agent(state: AgentState):
     num_of_news = data.get("num_of_news", 20)
     end_date = data.get("end_date")
 
-    news_list = get_stock_news(symbol, max_news=num_of_news, date=end_date)
+    news_list = get_stock_news(
+        symbol,
+        max_news=num_of_news,
+        date=end_date,
+        agent_name="sentiment_agent",
+        trace_state=state,
+    )
     logger.info(
         "🗞️ 原始新闻 %d 条 (请求 %d) — %s",
         len(news_list),
@@ -53,6 +59,7 @@ def sentiment_agent(state: AgentState):
             num_of_news=num_of_news,
             symbol=symbol,
             cache_date=end_date or datetime.now().strftime("%Y-%m-%d"),
+            trace_state=state,
         )
         logger.debug(
             "Sentiment score for %s based on %d filtered news: %.4f",

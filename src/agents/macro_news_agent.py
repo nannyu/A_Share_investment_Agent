@@ -9,7 +9,8 @@ from langchain_core.messages import HumanMessage
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
 from src.tools.news_crawler import get_stock_news
 from src.tools.openrouter_config import get_chat_completion
-from src.utils.api_utils import agent_endpoint
+from src.utils.api_utils import agent_endpoint, log_llm_interaction
+from src.utils.prompt_loader import load_prompt
 from src.utils.logging_config import setup_logger
 
 MACRO_INDEX_NAME = "沪深300指数"
@@ -17,31 +18,9 @@ DEFAULT_SUMMARY_TEXT = "宏观新闻分析不可用或尚未生成。"
 ERROR_SUMMARY_TEXT = "宏观新闻分析过程中发生错误"
 MACRO_SUMMARY_PATH = os.path.join("src", "data", "macro_summary.json")
 
-LLM_PROMPT_MACRO_ANALYSIS = """
-你是一名专注中国A股的宏观分析师。请阅读下面关于“沪深300指数(代码:000300)”的新闻数据，给出结构化的宏观看法。
+LLM_PROMPT_MACRO_ANALYSIS = load_prompt("prompts/macro_news_agent/prompt.md")
 
-请只输出一个 JSON 对象，不要添加额外文字，格式如下（字段顺序保持一致）：
-{
-  "index": "沪深300指数",
-  "signal": "bullish" | "bearish" | "neutral",
-  "confidence": 介于0和1之间的小数,
-  "score": 0到100之间的整数,
-  "summary": "用1-2段中文概括市场整体环境、关键事件与结论",
-  "key_drivers": ["列出1-3条核心利多或推动因素，信息不足可写'暂无'"],
-  "key_risks": ["列出1-3条潜在风险/利空，信息不足可写'暂无'"],
-  "actionable_insight": "给机构投资者的具体可操作提示（中文）"
-}
 
-要求：
-- 完全基于提供的新闻数据，若新闻极少也要说明信息不足。
-- 如果新闻整体偏利多，请输出 bullish；偏利空输出 bearish；否则输出 neutral。
-- confidence 和 score 必须与信号一致，无法评估时用 0.5 / 50 并说明原因。
-- key_drivers 与 key_risks 不可为空，可用 “暂无” 填充。
-- 请仅返回 Python json.dumps(...) 生成的字符串，确保所有字符串自动转义。
-
-【新闻数据 JSON】
-<<NEWS_JSON>>
-"""
 
 
 logger = setup_logger("macro_news_agent")
@@ -300,7 +279,13 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
         try:
             logger.info("📰 正在抓取指数新闻: %s", symbol)
             today_str = datetime.now().strftime("%Y-%m-%d")
-            news_raw = get_stock_news(symbol, max_news=100, date=today_str)
+            news_raw = get_stock_news(
+                symbol,
+                max_news=100,
+                date=today_str,
+                agent_name="macro_news_agent",
+                trace_state=state,
+            )
             if not news_raw:
                 summary_failed = True
                 logger.warning("?? 未获取到任何宏观新闻，使用默认摘要。")
@@ -337,9 +322,11 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
                 news_json = _format_prompt_payload(news_items)
                 prompt_text = LLM_PROMPT_MACRO_ANALYSIS.replace("<<NEWS_JSON>>", news_json)
                 logger.info("🤖 调用 LLM 生成宏观摘要 (news=%d)", retrieved_news_count)
-                llm_response = get_chat_completion([
-                    {"role": "user", "content": prompt_text}
-                ])
+                llm_response = log_llm_interaction(state)(
+                    lambda: get_chat_completion(
+                        [{"role": "user", "content": prompt_text}]
+                    )
+                )()
                 if not llm_response:
                     raise ValueError("LLM returned empty response for macro news analysis.")
                 analysis_payload = _payload_from_llm(llm_response, retrieved_news_count, False, today_str)

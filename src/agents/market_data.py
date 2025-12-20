@@ -51,7 +51,7 @@ def market_data_agent(state: AgentState):
 
     # 获取财务指标
     try:
-        financial_metrics = get_financial_metrics(ticker)
+        financial_metrics = get_financial_metrics(ticker, trace_state=state)
     except Exception as e:
         logger.error(f"获取财务指标失败: {str(e)}")
         financial_metrics = {}
@@ -65,7 +65,7 @@ def market_data_agent(state: AgentState):
 
     # 获取市场数据
     try:
-        market_data = get_market_data(ticker)
+        market_data = get_market_data(ticker, trace_state=state)
     except Exception as e:
         logger.error(f"获取市场数据失败: {str(e)}")
         market_data = {"market_cap": 0}

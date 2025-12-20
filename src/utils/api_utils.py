@@ -45,6 +45,7 @@ from backend.schemas import LLMInteractionLog  # Keep
 from backend.schemas import AgentExecutionLog  # Keep
 from src.utils.serialization import serialize_agent_state  # Keep
 from src.utils.trace_logger import trace_agent_io  # File-based trace for backtest
+from src.utils.agent_trace_filter import build_agent_trace_payload
 
 # 导入日志记录器
 try:
@@ -354,11 +355,17 @@ def agent_endpoint(agent_name: str, description: str = ""):
 
                 if trace_dir:
                     try:
+                        filtered_input = build_agent_trace_payload(
+                            serialized_input, agent_name, "input"
+                        )
+                        filtered_output = build_agent_trace_payload(
+                            serialized_output, agent_name, "output"
+                        )
                         trace_agent_io(
                             trace_dir,
                             agent_name,
-                            serialized_input,
-                            serialized_output,
+                            filtered_input,
+                            filtered_output,
                             terminal_outputs,
                             reasoning_details,
                         )

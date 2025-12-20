@@ -6,6 +6,7 @@ from src.utils.api_utils import agent_endpoint, log_llm_interaction
 import json
 from datetime import datetime, timedelta
 from src.tools.openrouter_config import get_chat_completion
+from src.utils.prompt_loader import load_prompt, format_prompt
 from src.database import AkshareSQLiteCache
 from src.tools.akshare_cache import CACHE_PATH
 
@@ -26,7 +27,13 @@ def macro_analyst_agent(state: AgentState):
     end_date = data.get("end_date")  # 从 run_hedge_fund 传递来的 end_date
 
     # 获取大量新闻数据（最多100条），传递正确的日期参数
-    news_list = get_stock_news(symbol, max_news=100, date=end_date)
+    news_list = get_stock_news(
+        symbol,
+        max_news=100,
+        date=end_date,
+        agent_name="macro_analyst_agent",
+        trace_state=state,
+    )
 
     # 过滤七天前的新闻（只对有publish_time字段的新闻进行过滤）
     cutoff_date = datetime.now() - timedelta(days=7)
@@ -58,7 +65,12 @@ def macro_analyst_agent(state: AgentState):
         }
     else:
         # 获取宏观分析结果
-        macro_analysis = get_macro_news_analysis(recent_news, symbol=symbol, cache_date=end_date)
+        macro_analysis = get_macro_news_analysis(
+            recent_news,
+            symbol=symbol,
+            cache_date=end_date,
+            trace_state=state,
+        )
         message_content = macro_analysis
         logger.info(
             "📊 宏观分析完成: env=%s impact=%s (news=%d)",
@@ -93,7 +105,13 @@ def macro_analyst_agent(state: AgentState):
     }
 
 
-def get_macro_news_analysis(news_list: list, *, symbol: str | None = None, cache_date: str | None = None) -> dict:
+def get_macro_news_analysis(
+    news_list: list,
+    *,
+    symbol: str | None = None,
+    cache_date: str | None = None,
+    trace_state: dict | None = None,
+) -> dict:
     """分析宏观经济新闻对股票的影响
 
     Args:
@@ -136,27 +154,7 @@ def get_macro_news_analysis(news_list: list, *, symbol: str | None = None, cache
     # 准备系统消息
     system_message = {
         "role": "system",
-        "content": """你是一位专业的宏观经济分析师，专注于分析宏观经济环境对A股个股的影响。
-        请分析提供的新闻，从宏观角度评估当前经济环境，并分析这些宏观因素对目标股票的潜在影响。
-        
-        请关注以下宏观因素：
-        1. 货币政策：利率、准备金率、公开市场操作等
-        2. 财政政策：政府支出、税收政策、补贴等
-        3. 产业政策：行业规划、监管政策、环保要求等
-        4. 国际环境：全球经济形势、贸易关系、地缘政治等
-        5. 市场情绪：投资者信心、市场流动性、风险偏好等
-        
-        你的分析应该包括：
-        1. 宏观环境评估：积极(positive)、中性(neutral)或消极(negative)
-        2. 对目标股票的影响：利好(positive)、中性(neutral)或利空(negative)
-        3. 关键影响因素：列出3-5个最重要的宏观因素
-        4. 详细推理：解释为什么这些因素会影响目标股票
-        
-        请确保你的分析：
-        1. 基于事实和数据，而非猜测
-        2. 考虑行业特性和公司特点
-        3. 关注中长期影响，而非短期波动
-        4. 提供具体、可操作的见解"""
+        "content": load_prompt("prompts/macro_analyst/system.md"),
     }
 
     # 准备新闻内容
@@ -173,13 +171,21 @@ def get_macro_news_analysis(news_list: list, *, symbol: str | None = None, cache
 
     user_message = {
         "role": "user",
-        "content": f"请分析以下新闻，评估当前宏观经济环境及其对相关A股上市公司的影响：\n\n{news_content}\n\n请以JSON格式返回结果，包含以下字段：macro_environment（宏观环境：positive/neutral/negative）、impact_on_stock（对股票影响：positive/neutral/negative）、key_factors（关键因素数组）、reasoning（详细推理）。"
+        "content": format_prompt(
+            "prompts/macro_analyst/user.md",
+            news_content=news_content,
+        ),
     }
 
     try:
         # 获取LLM分析结果
         logger.info("🤖 正在调用LLM进行宏观分析...")
-        result = get_chat_completion([system_message, user_message])
+        if trace_state:
+            result = log_llm_interaction(trace_state)(
+                lambda: get_chat_completion([system_message, user_message])
+            )()
+        else:
+            result = get_chat_completion([system_message, user_message])
         if result is None:
             logger.error("❌ LLM分析失败，无法获取宏观分析结果")
             return {

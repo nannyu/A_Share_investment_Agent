@@ -37,14 +37,14 @@ def _default_agent_metrics() -> Dict[str, float]:
     }
 
 
-def get_financial_metrics(symbol: str) -> Dict[str, Any]:
+def get_financial_metrics(symbol: str, *, trace_state: dict | None = None) -> Dict[str, Any]:
     """获取财务指标数据"""
     logger.info(f"Getting financial indicators for {symbol}...")
     try:
         # ��ȡʵʱ�������ݣ�������ֵ�͹�ֵ���ʣ�
         logger.info("Fetching market snapshot...")
         try:
-            snapshot = get_market_snapshot(symbol)
+            snapshot = get_market_snapshot(symbol, trace_state=trace_state)
             logger.info("✓ Market snapshot prepared")
         except Exception as snapshot_err:  # noqa: BLE001
             logger.warning("Market snapshot unavailable: %s", snapshot_err)
@@ -349,10 +349,10 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         return [default_item, default_item]
 
 
-def get_market_data(symbol: str) -> Dict[str, Any]:
+def get_market_data(symbol: str, *, trace_state: dict | None = None) -> Dict[str, Any]:
     """获取市场数据（自研引擎 + LLM 快照）"""
     try:
-        snapshot = get_market_snapshot(symbol)
+        snapshot = get_market_snapshot(symbol, trace_state=trace_state)
         return {
             "market_cap": snapshot.get("market_cap", 0.0),
             "volume": snapshot.get("volume", 0.0),

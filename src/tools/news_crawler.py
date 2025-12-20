@@ -13,6 +13,9 @@ from src.tools.akshare_cache import get_stock_news as get_stock_news_akshare_cac
 from src.tools.akshare_cache import CACHE_PATH
 from pathlib import Path
 from src.database import AkshareSQLiteCache
+from src.tools.news_query_builder import build_news_query
+from src.utils.api_utils import log_llm_interaction
+from src.utils.prompt_loader import load_prompt, format_prompt
 
 # 导入新的搜索模块
 try:
@@ -33,44 +36,8 @@ NEWS_CACHE_DB_PATH = BASE_DIR / "data" / "market_data_cache.db"
 NEWS_CACHE_TABLE = "stock_news_cache"
 
 def build_search_query(symbol: str, date: str = None) -> str:
-    """
-    构建针对股票新闻的 Google 搜索查询
-
-    Args:
-        symbol: 股票代码，如 "300059"
-        date: 截止日期，格式 "YYYY-MM-DD"
-
-    Returns:
-        构建好的搜索查询字符串
-    """
-    # 基础查询：股票代码 + 新闻关键词
-    base_query = f"{symbol} 股票 新闻 财经"
-
-    # 添加时间限制（搜索指定日期之前的新闻）
-    if date:
-        try:
-            # 解析日期并计算一周前的日期作为开始时间
-            end_date = datetime.strptime(date, "%Y-%m-%d")
-            start_date = end_date - timedelta(days=7)  # 搜索过去一周的新闻
-
-            # Google 搜索时间语法：after:YYYY-MM-DD before:YYYY-MM-DD
-            base_query += f" after:{start_date.strftime('%Y-%m-%d')} before:{date}"
-        except ValueError:
-            print(f"⚠️ 日期格式错误: {date}，忽略时间限制")
-
-    # 限制新闻网站 - 只选择主要的财经网站
-    news_sites = [
-        "site:sina.com.cn",
-        "site:163.com",
-        "site:eastmoney.com",
-        "site:cnstock.com",
-        "site:hexun.com"
-    ]
-
-    # 添加网站限制
-    query = f"{base_query} ({' OR '.join(news_sites)})"
-
-    return query
+    """兼容旧入口，返回规则化搜索查询。"""
+    return build_news_query(symbol, date=date)
 
 
 def extract_domain(url: str) -> str:
@@ -239,7 +206,14 @@ def get_stock_news_via_akshare(symbol: str, max_news: int = 10, *, cache_date: s
         return []
 
 
-def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
+def get_stock_news(
+    symbol: str,
+    max_news: int = 10,
+    date: str = None,
+    *,
+    agent_name: str | None = None,
+    trace_state: dict | None = None,
+) -> list:
     """获取并处理个股新闻
 
     Args:
@@ -307,7 +281,12 @@ def get_stock_news(symbol: str, max_news: int = 10, date: str = None) -> list:
     fetch_count = max(need_more_news, max_news)  # 至少获取请求的数量
 
     # 构建搜索查询（Tavily/Google 共用）
-    search_query = build_search_query(symbol, date)
+    search_query = build_news_query(
+        symbol,
+        date=date,
+        agent_name=agent_name,
+        trace_state=trace_state,
+    )
 
     # 优先：Tavily（需要配置 TAVILY_API_KEY；比直接爬 Google 更稳定）
     new_news_list = []
@@ -465,6 +444,7 @@ def get_news_sentiment(
     *,
     symbol: str | None = None,
     cache_date: str | None = None,
+    trace_state: dict | None = None,
 ) -> float:
     """分析新闻情感得分
 
@@ -506,29 +486,7 @@ def get_news_sentiment(
     # 准备系统消息
     system_message = {
         "role": "system",
-        "content": """你是一个专业的A股市场分析师，擅长解读新闻对股票走势的影响。你需要分析一组新闻的情感倾向，并给出一个介于-1到1之间的分数：
-        - 1表示极其积极（例如：重大利好消息、超预期业绩、行业政策支持）
-        - 0.5到0.9表示积极（例如：业绩增长、新项目落地、获得订单）
-        - 0.1到0.4表示轻微积极（例如：小额合同签订、日常经营正常）
-        - 0表示中性（例如：日常公告、人事变动、无重大影响的新闻）
-        - -0.1到-0.4表示轻微消极（例如：小额诉讼、非核心业务亏损）
-        - -0.5到-0.9表示消极（例如：业绩下滑、重要客户流失、行业政策收紧）
-        - -1表示极其消极（例如：重大违规、核心业务严重亏损、被监管处罚）
-
-        分析时重点关注：
-        1. 业绩相关：财报、业绩预告、营收利润等
-        2. 政策影响：行业政策、监管政策、地方政策等
-        3. 市场表现：市场份额、竞争态势、商业模式等
-        4. 资本运作：并购重组、股权激励、定增配股等
-        5. 风险事件：诉讼仲裁、处罚、债务等
-        6. 行业地位：技术创新、专利、市占率等
-        7. 舆论环境：媒体评价、社会影响等
-
-        请确保分析：
-        1. 新闻的真实性和可靠性
-        2. 新闻的时效性和影响范围
-        3. 对公司基本面的实际影响
-        4. A股市场的特殊反应规律"""
+        "content": load_prompt("prompts/sentiment/system.md"),
     }
 
     # 准备新闻内容
@@ -542,14 +500,22 @@ def get_news_sentiment(
 
     user_message = {
         "role": "user",
-        "content": f"请分析以下A股上市公司相关新闻的情感倾向：\n\n{news_content}\n\n请直接返回一个数字，范围是-1到1，无需解释。"
+        "content": format_prompt(
+            "prompts/sentiment/user.md",
+            news_content=news_content,
+        ),
     }
 
     try:
 
         # 获取LLM响应
 
-        result = get_chat_completion([system_message, user_message])
+        if trace_state:
+            result = log_llm_interaction(trace_state)(
+                lambda: get_chat_completion([system_message, user_message])
+            )()
+        else:
+            result = get_chat_completion([system_message, user_message])
 
         if result is None:
 

@@ -2,6 +2,7 @@ from langchain_core.messages import HumanMessage
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
 from src.tools.openrouter_config import get_chat_completion
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
+from src.utils.prompt_loader import load_prompt, format_prompt
 import json
 import ast
 import logging
@@ -94,25 +95,17 @@ def debate_room_agent(state: AgentState):
     logger.info(f"准备让 LLM 分析 {len(all_perspectives)} 个研究员的观点")
 
     # 构建发送给 LLM 的提示
-    llm_prompt = """
-    你是一位专业的金融分析师，请分析以下投资研究员的观点，并给出你的第三方分析。
-    
-    """
+    perspective_blocks = []
     for perspective, data in all_perspectives.items():
-        llm_prompt += f"\n{perspective.upper()} 观点 (置信度: {data['confidence']}):\n"
+        lines = [f"{perspective.upper()} 观点 (置信度: {data['confidence']}):"]
         for point in data["thesis_points"]:
-            llm_prompt += f"- {point}\n"
-    
-    llm_prompt += """
-    请仅输出一个 JSON，格式如下（所有文字内容必须使用中文，勿添加代码块或额外解释）:
-    {
-        "analysis": "你的详细分析，评估双方观点并指出最有说服力的论点",
-        "score": 0.5,
-        "reasoning": "简要说明为何给出该评分"
-    }
-    
-    其中 score 取值范围 [-1.0, 1.0]，负值代表偏空，正值代表偏多，0 为中性。务必返回合法 JSON。
-    """
+            lines.append(f"- {point}")
+        perspective_blocks.append("\n".join(lines))
+    perspectives_block = "\n\n".join(perspective_blocks)
+    llm_prompt = format_prompt(
+        "prompts/debate_room/user.md",
+        perspectives_block=perspectives_block,
+    )
     
     # 调用 LLM 获取第三方观点
     llm_response = None
@@ -123,7 +116,7 @@ def debate_room_agent(state: AgentState):
         messages = [
             {
                 "role": "system",
-                "content": "你是一名专业的金融分析师，请严格按照用户提示返回唯一的 JSON，所有说明均使用中文。",
+                "content": load_prompt("prompts/debate_room/system.md"),
             },
             {"role": "user", "content": llm_prompt},
         ]

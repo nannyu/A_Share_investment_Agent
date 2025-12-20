@@ -10,6 +10,8 @@ from src.database import AkshareSQLiteCache
 from src.tools.news_crawler import get_stock_news
 from src.tools.openrouter_config import get_chat_completion
 from src.utils.logging_config import setup_logger
+from src.utils.api_utils import log_llm_interaction
+from src.utils.prompt_loader import load_prompt
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 CACHE_PATH = BASE_DIR / "data" / "market_data_cache.db"
@@ -34,18 +36,7 @@ def _build_prompt(symbol: str, news_items: List[Dict[str, str]]) -> List[Dict[st
             )
         news_block = "\n\n".join(lines)
 
-    system_message = (
-        "你是市场数据分析师。请阅读输入的新闻要点，"
-        "输出一个JSON，包含以下字段：\n"
-        "- market_cap: 公司总市值，十进制数字，单位亿元人民币；\n"
-        "- volume: 当日成交量（万手），十进制数字；\n"
-        "- average_volume: 过去5日平均成交量（万手），十进制数字；\n"
-        "- fifty_two_week_high: 52周最高价（元）；\n"
-        "- fifty_two_week_low: 52周最低价（元）；\n"
-        "- confidence: 一个0-1之间的置信度，表示上述数据可信度；\n"
-        "- summary: 对当前市场状态的简短中文总结。\n"
-        "如果新闻中缺少精确数值，请根据报道做出合理估计，并注明含义。"
-    )
+    system_message = load_prompt("prompts/market_snapshot/system.md")
     user_message = (
         f"股票代码：{symbol}\n"
         f"新闻要点：\n{news_block}\n\n"
@@ -138,14 +129,24 @@ def _sanitize_snapshot(data: Dict[str, Any]) -> Dict[str, float]:
         "summary": str(data.get("summary", "")).strip(),
     }
 
-def _generate_snapshot(symbol: str) -> Dict[str, Any]:
-    news_items = get_stock_news(symbol, max_news=20)
+def _generate_snapshot(symbol: str, trace_state: dict | None = None) -> Dict[str, Any]:
+    news_items = get_stock_news(
+        symbol,
+        max_news=20,
+        agent_name="market_snapshot",
+        trace_state=trace_state,
+    )
     logger.info("🗞️ Snapshot news pool for %s: %d 条", symbol, len(news_items))
     if not news_items:
         logger.warning("⚠️ Snapshot prompt缺少新闻，将使用空模板: %s", symbol)
     messages = _build_prompt(symbol, news_items)
     logger.info("🤖 正在调用 LLM 生成 %s 的市场快照...", symbol)
-    llm_response = get_chat_completion(messages)
+    if trace_state:
+        llm_response = log_llm_interaction(trace_state)(
+            lambda: get_chat_completion(messages)
+        )()
+    else:
+        llm_response = get_chat_completion(messages)
     snapshot_raw = _parse_snapshot_response(llm_response or "{}")
     sanitized = _sanitize_snapshot(snapshot_raw)
     sanitized.setdefault("summary", "")
@@ -156,7 +157,12 @@ def _generate_snapshot(symbol: str) -> Dict[str, Any]:
     return sanitized
 
 
-def get_market_snapshot(symbol: str, ttl_seconds: int = SNAPSHOT_TTL_SECONDS) -> Dict[str, Any]:
+def get_market_snapshot(
+    symbol: str,
+    ttl_seconds: int = SNAPSHOT_TTL_SECONDS,
+    *,
+    trace_state: dict | None = None,
+) -> Dict[str, Any]:
     cached = cache.fetch_records(
         table=SNAPSHOT_TABLE,
         filters={"symbol": symbol},
@@ -169,7 +175,7 @@ def get_market_snapshot(symbol: str, ttl_seconds: int = SNAPSHOT_TTL_SECONDS) ->
         logger.info("📦 Market snapshot cache hit for %s", symbol)
         return record
 
-    snapshot = _generate_snapshot(symbol)
+    snapshot = _generate_snapshot(symbol, trace_state=trace_state)
     record = {"symbol": symbol, **snapshot}
     cache.upsert_records(SNAPSHOT_TABLE, [record], key_columns=["symbol"])
     logger.info("⚙️ Market snapshot refreshed for %s", symbol)
