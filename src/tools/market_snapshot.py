@@ -130,10 +130,11 @@ def _sanitize_snapshot(data: Dict[str, Any]) -> Dict[str, float]:
         "summary": str(data.get("summary", "")).strip(),
     }
 
-def _generate_snapshot(symbol: str, trace_state: dict | None = None) -> Dict[str, Any]:
+def _generate_snapshot(symbol: str, trace_state: dict | None = None, as_of_date: str | None = None) -> Dict[str, Any]:
     news_items = get_stock_news(
         symbol,
         max_news=20,
+        date=as_of_date,
         agent_name="market_snapshot",
         trace_state=trace_state,
     )
@@ -164,12 +165,13 @@ def get_market_snapshot(
     *,
     trace_state: dict | None = None,
     agent_name: str | None = None,
+    as_of_date: str | None = None,
 ) -> Dict[str, Any]:
     refresh_snapshot = get_cache_refresh_flag(agent_name or "market_snapshot", "snapshot")
     if refresh_snapshot:
         logger.info("🔄 强制刷新市场快照缓存: %s", symbol)
 
-    cache_date = datetime.now().strftime("%Y-%m-%d")
+    cache_date = (as_of_date or datetime.now().strftime("%Y-%m-%d"))
 
     if not refresh_snapshot:
         cached = cache.fetch_records(
@@ -184,7 +186,7 @@ def get_market_snapshot(
             logger.info("?? Market snapshot cache hit for %s (%s)", symbol, cache_date)
             return record
 
-    snapshot = _generate_snapshot(symbol, trace_state=trace_state)
+    snapshot = _generate_snapshot(symbol, trace_state=trace_state, as_of_date=cache_date)
     record = {"symbol": symbol, **snapshot}
     cache.upsert_records(SNAPSHOT_TABLE, [record], key_columns=["symbol"])
     logger.info("⚙️ Market snapshot refreshed for %s", symbol)

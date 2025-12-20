@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
 import os
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -32,6 +33,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 _default_cache_path = BASE_DIR / "data" / "market_data_cache.db"
 CACHE_PATH = Path(os.getenv("MARKET_CACHE_DB_PATH", str(_default_cache_path)))
 HISTORY_TABLE = "baostock_history_k"
+STOCK_NEWS_EM_TABLE = "stock_news_em_daily"
 
 logger = setup_logger("akshare_cache")
 cache = AkshareSQLiteCache(CACHE_PATH)
@@ -364,14 +366,21 @@ def get_stock_news(
 
     if not force_refresh:
         cached = cache.fetch_records(
-            table="stock_news_em",
+            table=STOCK_NEWS_EM_TABLE,
             filters={COL_KEYWORD: symbol, COL_CACHE_DATE: date_str},
             ttl_seconds=effective_ttl,
-            order_by=f'"{COL_PUBLISH_TIME}" DESC',
+            limit=1,
         )
         if cached:
-            _log_cache_hit("stock_news_em", symbol, len(cached))
-            return _records_to_df(cached)
+            _log_cache_hit(STOCK_NEWS_EM_TABLE, symbol, len(cached))
+            record = dict(cached[0])
+            news_json = record.get("news_json")
+            if news_json:
+                try:
+                    records = json.loads(news_json)
+                    return pd.DataFrame(records)
+                except Exception:
+                    return pd.DataFrame()
 
     df = _call_with_retry(lambda: ak.stock_news_em(symbol=symbol), "stock_news_em")
     if df is None:
@@ -392,10 +401,16 @@ def get_stock_news(
     if df.empty:
         return pd.DataFrame()
 
+    record = {
+        COL_KEYWORD: symbol,
+        COL_CACHE_DATE: date_str,
+        "news_json": json.dumps(df.to_dict("records"), ensure_ascii=False),
+        "news_count": len(df),
+    }
     cache.upsert_records(
-        "stock_news_em",
-        df.to_dict("records"),
-        key_columns=[COL_KEYWORD, COL_CACHE_DATE, COL_HEADLINE],
+        STOCK_NEWS_EM_TABLE,
+        [record],
+        key_columns=[COL_KEYWORD, COL_CACHE_DATE],
     )
-    _log_cache_upsert("stock_news_em", symbol, len(df))
+    _log_cache_upsert(STOCK_NEWS_EM_TABLE, symbol, len(df))
     return df

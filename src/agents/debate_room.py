@@ -168,17 +168,20 @@ def debate_room_agent(state: AgentState):
         f"计算混合置信度差异: 原始差异={confidence_diff:.4f}, LLM评分={llm_score:.4f}, 混合差异={mixed_confidence_diff:.4f}")
 
     # 基于混合置信度差异确定最终建议
+    # 优先使用LLM返回的reasoning
+    llm_reasoning_text = llm_analysis.get("reasoning", "") if llm_analysis else ""
+    
     if abs(mixed_confidence_diff) < 0.1:  # 接近争论
         final_signal = "neutral"
-        reasoning = "Balanced debate with strong arguments on both sides"
+        reasoning = llm_reasoning_text or "多空双方论点均衡，信号偏中性"
         confidence = max(bull_confidence, bear_confidence)
     elif mixed_confidence_diff > 0:  # 看多胜出
         final_signal = "bullish"
-        reasoning = "Bullish arguments more convincing"
+        reasoning = llm_reasoning_text or "多方论点更具说服力"
         confidence = bull_confidence
     else:  # 看空胜出
         final_signal = "bearish"
-        reasoning = "Bearish arguments more convincing"
+        reasoning = llm_reasoning_text or "空方论点更具说服力"
         confidence = bear_confidence
 
     logger.info(f"最终投资信号: {final_signal}, 置信度: {confidence}")
@@ -197,6 +200,7 @@ def debate_room_agent(state: AgentState):
         "debate_summary": debate_summary,
         "reasoning": reasoning
     }
+
 
     message = HumanMessage(
         content=json.dumps(message_content, ensure_ascii=False),

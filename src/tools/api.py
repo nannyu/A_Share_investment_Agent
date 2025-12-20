@@ -38,16 +38,22 @@ def _default_agent_metrics() -> Dict[str, float]:
     }
 
 
-def get_financial_metrics(symbol: str, *, trace_state: dict | None = None) -> Dict[str, Any]:
+def get_financial_metrics(symbol: str, *, trace_state: dict | None = None, as_of_date: str | None = None) -> Dict[str, Any]:
     """获取财务指标数据"""
     logger.info(f"Getting financial indicators for {symbol}...")
     refresh_financial_indicators = get_cache_refresh_flag("market_data_agent", "financial_indicators")
     refresh_financial_reports = get_cache_refresh_flag("market_data_agent", "financial_reports")
+    cutoff = None
+    if as_of_date:
+        try:
+            cutoff = pd.to_datetime(as_of_date)
+        except Exception:
+            cutoff = None
     try:
         # ��ȡʵʱ�������ݣ�������ֵ�͹�ֵ���ʣ�
         logger.info("Fetching market snapshot...")
         try:
-            snapshot = get_market_snapshot(symbol, trace_state=trace_state, agent_name="market_data_agent")
+            snapshot = get_market_snapshot(symbol, trace_state=trace_state, agent_name="market_data_agent", as_of_date=as_of_date)
             logger.info("✓ Market snapshot prepared")
         except Exception as snapshot_err:  # noqa: BLE001
             logger.warning("Market snapshot unavailable: %s", snapshot_err)
@@ -61,6 +67,12 @@ def get_financial_metrics(symbol: str, *, trace_state: dict | None = None) -> Di
         current_year = datetime.now().year
         financial_data = get_financial_indicators(
             symbol=symbol, start_year=str(current_year-1), force_refresh=refresh_financial_indicators)
+        if cutoff is not None:
+            try:
+                financial_data['日期'] = pd.to_datetime(financial_data['日期'])
+                financial_data = financial_data[financial_data['日期'] <= cutoff]
+            except Exception:
+                pass
         if financial_data is None or financial_data.empty:
             logger.warning("No financial indicator data available, using defaults.")
             return [_default_agent_metrics()]
@@ -78,6 +90,14 @@ def get_financial_metrics(symbol: str, *, trace_state: dict | None = None) -> Di
         logger.info("Fetching income statement...")
         try:
             income_statement = get_financial_report(symbol, REPORT_INCOME_STATEMENT, force_refresh=refresh_financial_reports)
+            if cutoff is not None and not income_statement.empty and "报告日" in income_statement.columns:
+                try:
+                    income_statement["报告日"] = pd.to_datetime(income_statement["报告日"])
+                    income_statement = income_statement[income_statement["报告日"] <= cutoff]
+                except Exception:
+                    pass
+            if "报告日" in income_statement.columns:
+                income_statement = income_statement.sort_values("报告日", ascending=False)
             if not income_statement.empty:
                 latest_income = income_statement.iloc[0]
                 logger.info("✓ Income statement fetched")
@@ -202,15 +222,29 @@ def get_financial_metrics(symbol: str, *, trace_state: dict | None = None) -> Di
         return [_default_agent_metrics()]
 
 
-def get_financial_statements(symbol: str) -> Dict[str, Any]:
+def get_financial_statements(symbol: str, *, as_of_date: str | None = None) -> Dict[str, Any]:
     """获取财务报表数据"""
     logger.info(f"Getting financial statements for {symbol}...")
     refresh_financial_reports = get_cache_refresh_flag("market_data_agent", "financial_reports")
+    cutoff = None
+    if as_of_date:
+        try:
+            cutoff = pd.to_datetime(as_of_date)
+        except Exception:
+            cutoff = None
     try:
         # 获取资产负债表数据
         logger.info("Fetching balance sheet...")
         try:
             balance_sheet = get_financial_report(symbol, REPORT_BALANCE_SHEET, force_refresh=refresh_financial_reports)
+            if cutoff is not None and not balance_sheet.empty and "报告日" in balance_sheet.columns:
+                try:
+                    balance_sheet["报告日"] = pd.to_datetime(balance_sheet["报告日"])
+                    balance_sheet = balance_sheet[balance_sheet["报告日"] <= cutoff]
+                except Exception:
+                    pass
+            if "报告日" in balance_sheet.columns:
+                balance_sheet = balance_sheet.sort_values("报告日", ascending=False)
             if not balance_sheet.empty:
                 latest_balance = balance_sheet.iloc[0]
                 previous_balance = balance_sheet.iloc[1] if len(
@@ -231,6 +265,14 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         logger.info("Fetching income statement...")
         try:
             income_statement = get_financial_report(symbol, REPORT_INCOME_STATEMENT, force_refresh=refresh_financial_reports)
+            if cutoff is not None and not income_statement.empty and "报告日" in income_statement.columns:
+                try:
+                    income_statement["报告日"] = pd.to_datetime(income_statement["报告日"])
+                    income_statement = income_statement[income_statement["报告日"] <= cutoff]
+                except Exception:
+                    pass
+            if "报告日" in income_statement.columns:
+                income_statement = income_statement.sort_values("报告日", ascending=False)
             if not income_statement.empty:
                 latest_income = income_statement.iloc[0]
                 previous_income = income_statement.iloc[1] if len(
@@ -251,6 +293,14 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         logger.info("Fetching cash flow statement...")
         try:
             cash_flow = get_financial_report(symbol, REPORT_CASH_FLOW, force_refresh=refresh_financial_reports)
+            if cutoff is not None and not cash_flow.empty and "报告日" in cash_flow.columns:
+                try:
+                    cash_flow["报告日"] = pd.to_datetime(cash_flow["报告日"])
+                    cash_flow = cash_flow[cash_flow["报告日"] <= cutoff]
+                except Exception:
+                    pass
+            if "报告日" in cash_flow.columns:
+                cash_flow = cash_flow.sort_values("报告日", ascending=False)
             if not cash_flow.empty:
                 latest_cash_flow = cash_flow.iloc[0]
                 previous_cash_flow = cash_flow.iloc[1] if len(
@@ -353,10 +403,10 @@ def get_financial_statements(symbol: str) -> Dict[str, Any]:
         return [default_item, default_item]
 
 
-def get_market_data(symbol: str, *, trace_state: dict | None = None) -> Dict[str, Any]:
+def get_market_data(symbol: str, *, trace_state: dict | None = None, as_of_date: str | None = None) -> Dict[str, Any]:
     """获取市场数据（自研引擎 + LLM 快照）"""
     try:
-        snapshot = get_market_snapshot(symbol, trace_state=trace_state, agent_name="market_data_agent")
+        snapshot = get_market_snapshot(symbol, trace_state=trace_state, agent_name="market_data_agent", as_of_date=as_of_date)
         return {
             "market_cap": snapshot.get("market_cap", 0.0),
             "volume": snapshot.get("volume", 0.0),

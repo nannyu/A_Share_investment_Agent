@@ -34,7 +34,7 @@ except ImportError:
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 NEWS_CACHE_DB_PATH = BASE_DIR / "data" / "market_data_cache.db"
-NEWS_CACHE_TABLE = "stock_news_cache"
+NEWS_CACHE_TABLE = "stock_news_daily_cache"
 
 def build_search_query(symbol: str, date: str = None) -> str:
     """兼容旧入口，返回规则化搜索查询。"""
@@ -260,23 +260,29 @@ def get_stock_news(
         cached_records = cache.fetch_records(
             NEWS_CACHE_TABLE,
             filters={"symbol": symbol, "cache_date": cache_date},
-            order_by='"publish_time" DESC, "search_time" DESC',
-            limit=max_news,
+            limit=1,
         )
-        for r in cached_records:
-            r = dict(r)
-            r.pop("缓存时间", None)
-            cached_news.append(
-                {
-                    "title": r.get("title", ""),
-                    "content": r.get("content", ""),
-                    "source": r.get("source", ""),
-                    "url": r.get("url", ""),
-                    "keyword": symbol,
-                    "publish_time": r.get("publish_time") or "",
-                    "search_time": r.get("search_time") or "",
-                }
-            )
+        if cached_records:
+            record = dict(cached_records[0])
+            record.pop("缓存时间", None)
+            news_json = record.get("news_json")
+            if news_json:
+                try:
+                    cached_news = json.loads(news_json)
+                except Exception:
+                    cached_news = []
+            else:
+                cached_news = [
+                    {
+                        "title": record.get("title", ""),
+                        "content": record.get("content", ""),
+                        "source": record.get("source", ""),
+                        "url": record.get("url", ""),
+                        "keyword": symbol,
+                        "publish_time": record.get("publish_time") or "",
+                        "search_time": record.get("search_time") or "",
+                    }
+                ]
 
     if len(cached_news) >= max_news:
         print(f"📦 DB 缓存命中: {symbol} {cache_date}（{len(cached_news)} 条）")
@@ -391,29 +397,22 @@ def get_stock_news(
     combined_news = _sort_news_items(combined_news)
 
     # 写入 DB（只写新增部分即可）
-    if unique_new_news:
+    if unique_new_news or cached_news:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        rows = []
-        for n in unique_new_news:
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "cache_date": cache_date,
-                    "title": n.get("title", ""),
-                    "content": n.get("content", ""),
-                    "source": n.get("source", ""),
-                    "url": n.get("url", ""),
-                    "publish_time": n.get("publish_time") or "",
-                    "search_time": n.get("search_time") or now_str,
-                    "method": fetch_method or "",
-                }
-            )
+        row = {
+            "symbol": symbol,
+            "cache_date": cache_date,
+            "news_json": json.dumps(combined_news, ensure_ascii=False),
+            "news_count": len(combined_news),
+            "method": fetch_method or "",
+            "search_time": now_str,
+        }
         cache.upsert_records(
             NEWS_CACHE_TABLE,
-            rows,
-            key_columns=["symbol", "cache_date", "title"],
+            [row],
+            key_columns=["symbol", "cache_date"],
         )
-        print(f"💾 DB 写入新闻: {symbol} {cache_date}（新增 {len(rows)} 条，来源={fetch_method}）")
+        print(f"💾 DB 写入新闻: {symbol} {cache_date}（总计 {len(combined_news)} 条，来源={fetch_method}）")
 
     return combined_news[:max_news]
 
@@ -457,6 +456,7 @@ def _parse_sentiment_score(raw_text: str) -> float:
     raise ValueError(f"Unable to parse numeric sentiment score from response: {text[:160]}")
 
 
+
 def get_news_sentiment(
     news_list: list,
     num_of_news: int = 5,
@@ -465,7 +465,7 @@ def get_news_sentiment(
     cache_date: str | None = None,
     trace_state: dict | None = None,
     agent_name: str | None = None,
-) -> float:
+) -> dict:
     """分析新闻情感得分
 
     Args:
@@ -473,16 +473,12 @@ def get_news_sentiment(
         num_of_news (int): 用于分析的新闻数量，默认为5条
 
     Returns:
-        float: 情感得分，范围[-1, 1]，-1最消极，1最积极
+        dict: 包含 score, signal, confidence, reasoning 的字典
     """
+    default_result = {"score": 0.0, "signal": "neutral", "confidence": 0.5, "reasoning": ""}
+    
     if not news_list:
-        return 0.0
-
-    # # 获取项目根目录
-    # project_root = os.path.dirname(os.path.dirname(
-    #     os.path.dirname(os.path.abspath(__file__))))
-
-    # 情绪结果不缓存：每次基于最新新闻重新评估
+        return default_result
 
     # 准备系统消息
     system_message = {
@@ -496,7 +492,7 @@ def get_news_sentiment(
         f"来源：{news.get('source', '未知')}\n"
         f"时间：{news.get('publish_time', '未知')}\n"
         f"内容：{news.get('content', '')}"
-        for news in news_list[:num_of_news]  # 使用指定数量的新闻
+        for news in news_list[:num_of_news]
     ])
 
     user_message = {
@@ -508,9 +504,7 @@ def get_news_sentiment(
     }
 
     try:
-
         # 获取LLM响应
-
         if trace_state:
             result = log_llm_interaction(trace_state)(
                 lambda: get_chat_completion([system_message, user_message])
@@ -519,47 +513,50 @@ def get_news_sentiment(
             result = get_chat_completion([system_message, user_message])
 
         if result is None:
-
             print("❌ Error: LLM 返回 None，无法生成情感分数")
-
-            return 0.0
-
-
+            return default_result
 
         preview = str(result)
-
         print(f"🗒️ [sentiment] LLM 原始响应: {preview[:200]}")
 
+        # 尝试解析完整JSON
         try:
+            # 尝试提取JSON部分
+            json_start = preview.find('{')
+            json_end = preview.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                json_str = preview[json_start:json_end]
+                parsed = json.loads(json_str)
+                
+                score = float(parsed.get("score", 0))
+                score = max(-1.0, min(1.0, score))  # 确保在-1到1之间
+                
+                sentiment_result = {
+                    "score": score,
+                    "signal": parsed.get("signal", "neutral"),
+                    "confidence": float(parsed.get("confidence", 0.5)),
+                    "reasoning": parsed.get("reasoning", "")
+                }
+                print(f"✅ [sentiment] 解析完整JSON成功: score={score}")
+                return sentiment_result
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"⚠️ JSON解析失败，尝试提取数字: {e}")
 
+        # 兼容旧格式：只提取数字
+        try:
             sentiment_score = _parse_sentiment_score(preview)
-
+            sentiment_score = max(-1.0, min(1.0, sentiment_score))
+            print(f"✅ [sentiment] 回退到数字解析: {sentiment_score}")
+            return {
+                "score": sentiment_score,
+                "signal": "bullish" if sentiment_score >= 0.3 else ("bearish" if sentiment_score <= -0.3 else "neutral"),
+                "confidence": abs(sentiment_score),
+                "reasoning": ""
+            }
         except ValueError as e:
-
             print(f"⚠️ 解析情感分数失败: {e}")
-
-            return 0.0
-
-
-
-        print(f"✅ [sentiment] 解析得分: {sentiment_score}")
-
-
-
-        # 确保在-1到1之间
-
-        sentiment_score = max(-1.0, min(1.0, sentiment_score))
-
-
-
-        return sentiment_score
-
-
+            return default_result
 
     except Exception as e:
-
         print(f"❌ 情感分析过程中出错: {e}")
-
-        return 0.0  # 发生异常时退回中性评分
-
-
+        return default_result

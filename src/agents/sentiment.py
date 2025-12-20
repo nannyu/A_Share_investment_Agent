@@ -51,10 +51,10 @@ def sentiment_agent(state: AgentState):
         else:
             recent_news.append(news)
 
-    sentiment_score = None
+    sentiment_result = None
     sentiment_error = None
     try:
-        sentiment_score = get_news_sentiment(
+        sentiment_result = get_news_sentiment(
             recent_news,
             num_of_news=num_of_news,
             symbol=symbol,
@@ -62,6 +62,7 @@ def sentiment_agent(state: AgentState):
             trace_state=state,
             agent_name="sentiment_agent",
         )
+        sentiment_score = sentiment_result.get("score", 0.0)
         logger.debug(
             "Sentiment score for %s based on %d filtered news: %.4f",
             symbol,
@@ -83,7 +84,7 @@ def sentiment_agent(state: AgentState):
             sentiment_error,
         )
 
-    if sentiment_score is None:
+    if sentiment_result is None:
         signal = "error"
         confidence = "0%"
         reasoning_text = (
@@ -95,26 +96,30 @@ def sentiment_agent(state: AgentState):
             len(recent_news),
             symbol,
         )
-    elif sentiment_score >= 0.5:
-        signal = "bullish"
-        confidence = f"{round(abs(sentiment_score) * 100)}%"
-        reasoning_text = (
-            f"基于 {len(recent_news)} 条最新新闻，情绪得分 {sentiment_score:.2f}，整体偏多"
-        )
-        sentiment_value = sentiment_score
-    elif sentiment_score <= -0.5:
-        signal = "bearish"
-        confidence = f"{round(abs(sentiment_score) * 100)}%"
-        reasoning_text = (
-            f"基于 {len(recent_news)} 条最新新闻，情绪得分 {sentiment_score:.2f}，整体偏空"
-        )
-        sentiment_value = sentiment_score
     else:
-        signal = "neutral"
-        confidence = f"{round((1 - abs(sentiment_score)) * 100)}%"
-        reasoning_text = (
-            f"基于 {len(recent_news)} 条最新新闻，情绪得分 {sentiment_score:.2f}，信号偏中性"
-        )
+        # 使用LLM返回的结果
+        sentiment_score = sentiment_result.get("score", 0.0)
+        llm_signal = sentiment_result.get("signal", "neutral")
+        llm_reasoning = sentiment_result.get("reasoning", "")
+        
+        # 使用LLM返回的signal，如果没有则基于score计算
+        if llm_signal in ("bullish", "bearish", "neutral"):
+            signal = llm_signal
+        elif sentiment_score >= 0.3:
+            signal = "bullish"
+        elif sentiment_score <= -0.3:
+            signal = "bearish"
+        else:
+            signal = "neutral"
+        
+        confidence = f"{round(abs(sentiment_score) * 100)}%" if sentiment_score != 0 else "50%"
+        
+        # 优先使用LLM返回的reasoning，如果没有则用默认模板
+        if llm_reasoning:
+            reasoning_text = llm_reasoning
+        else:
+            reasoning_text = f"基于 {len(recent_news)} 条最新新闻，情绪得分 {sentiment_score:.2f}"
+        
         sentiment_value = sentiment_score
 
     message_content = {
@@ -123,6 +128,7 @@ def sentiment_agent(state: AgentState):
         "reasoning": reasoning_text,
     }
     logger.debug("Sentiment agent output: %s", message_content)
+
     logger.info(
         "📣 Sentiment 结论 %s / %s — %s",
         signal,

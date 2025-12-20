@@ -202,6 +202,8 @@ class Backtester:
                 }
                 if isinstance(result, dict):
                     meta = result.get("metadata", {}) if isinstance(result, dict) else {}
+                    if not isinstance(meta, dict):
+                        meta = {}
                     decision_details = meta.get("portfolio_management_agent_decision_details")
                     raw_response = meta.get("agent_reasoning")
                     if isinstance(decision_details, dict) and decision_details.get("action"):

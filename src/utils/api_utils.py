@@ -337,6 +337,9 @@ def agent_endpoint(agent_name: str, description: str = ""):
                 if log_content:
                     terminal_outputs.append(log_content)
 
+                if result is None:
+                    raise ValueError(f"Agent {agent_name} returned None")
+
                 # 序列化输出状态
                 serialized_output = serialize_agent_state(result)
                 api_state.update_agent_data(
@@ -406,6 +409,7 @@ def agent_endpoint(agent_name: str, description: str = ""):
                 # Record end time even on error
                 timestamp_end = datetime.now(UTC)
                 error = str(e)
+                logger.exception("Agent %s failed with exception", agent_name)
                 # 恢复标准输出/错误
                 sys.stdout = old_stdout
                 sys.stderr = old_stderr

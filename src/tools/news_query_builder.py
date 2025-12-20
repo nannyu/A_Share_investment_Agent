@@ -22,15 +22,30 @@ def _append_date_window(query: str, date: Optional[str]) -> str:
 
 def _rule_based_query(symbol: str, date: Optional[str], agent_name: Optional[str]) -> str:
     if agent_name == "macro_news_agent" or symbol in {"000300", "沪深300", "CSI300"}:
-        base = "沪深300 指数 中国 A股 宏观 政策 央行 经济 数据 流动性 市场情绪"
+        base = (
+            "沪深300 指数 中国 A股 宏观 政策 央行 经济 数据 "
+            "流动性 市场情绪 上交所 深交所 证监会 监管 公告"
+        )
     elif agent_name == "macro_analyst_agent":
-        base = f"{symbol} A股 宏观 政策 央行 经济 数据 行业 供需"
+        base = (
+            f"{symbol} A股 宏观 政策 央行 经济 数据 行业 供需 "
+            "上交所 深交所 中国 证监会 监管 公告 研报 券商"
+        )
     elif agent_name == "sentiment_agent":
-        base = f"{symbol} 公司 新闻 公告 业绩 订单 监管 风险"
+        base = (
+            f"{symbol} 公司 新闻 公告 业绩 订单 监管 风险 "
+            "A股 中国 上交所 深交所 证监会 研报 券商 重大事项"
+        )
     elif agent_name == "market_snapshot":
-        base = f"{symbol} 市值 成交量 换手 资金 研报 新闻 A股"
+        base = (
+            f"{symbol} 市值 成交量 换手 资金 研报 新闻 "
+            "A股 中国 上交所 深交所 资金流 含龙虎榜 机构"
+        )
     else:
-        base = f"{symbol} 股票 新闻 财经"
+        base = (
+            f"{symbol} 股票 新闻 财经 A股 中国 上交所 深交所 "
+            "公告 快讯 研报 券商 证监会 监管 重大事项"
+        )
 
     base = _append_date_window(base, date)
 
@@ -40,6 +55,21 @@ def _rule_based_query(symbol: str, date: Optional[str], agent_name: Optional[str
         "site:eastmoney.com",
         "site:cnstock.com",
         "site:hexun.com",
+        "site:10jqka.com.cn",
+        "site:stcn.com",
+        "site:yicai.com",
+        "site:cs.com.cn",
+        "site:jrj.com.cn",
+        "site:money.163.com",
+        "site:finance.sina.com.cn",
+        "site:finance.eastmoney.com",
+        "site:stockstar.com",
+        "site:caixin.com",
+        "site:guosen.com.cn",
+        "site:htsec.com",
+        "site:gf.com.cn",
+        "site:citics.com",
+        "site:china.com.cn",
     ]
     return f"{base} ({' OR '.join(news_sites)})"
 
