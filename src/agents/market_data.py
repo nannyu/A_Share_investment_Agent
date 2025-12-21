@@ -2,6 +2,7 @@ from langchain_core.messages import HumanMessage
 from src.tools.openrouter_config import get_chat_completion
 from src.agents.state import AgentState, show_agent_reasoning, show_workflow_status
 from src.tools.api import get_financial_metrics, get_financial_statements, get_market_data, get_price_history
+from src.tools.market_snapshot import get_market_snapshot
 from src.utils.logging_config import setup_logger
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
 
@@ -49,9 +50,26 @@ def market_data_agent(state: AgentState):
         prices_df = pd.DataFrame(
             columns=['close', 'open', 'high', 'low', 'volume'])
 
+    # 先取一次市场快照，避免重复LLM调用
+    snapshot = None
+    try:
+        snapshot = get_market_snapshot(
+            ticker,
+            trace_state=state,
+            agent_name="market_data_agent",
+            as_of_date=end_date,
+        )
+    except Exception:
+        snapshot = None
+
     # 获取财务指标
     try:
-        financial_metrics = get_financial_metrics(ticker, trace_state=state, as_of_date=end_date)
+        financial_metrics = get_financial_metrics(
+            ticker,
+            trace_state=state,
+            as_of_date=end_date,
+            snapshot=snapshot,
+        )
     except Exception as e:
         logger.error(f"获取财务指标失败: {str(e)}")
         financial_metrics = {}
@@ -65,7 +83,12 @@ def market_data_agent(state: AgentState):
 
     # 获取市场数据
     try:
-        market_data = get_market_data(ticker, trace_state=state, as_of_date=end_date)
+        market_data = get_market_data(
+            ticker,
+            trace_state=state,
+            as_of_date=end_date,
+            snapshot=snapshot,
+        )
     except Exception as e:
         logger.error(f"获取市场数据失败: {str(e)}")
         market_data = {"market_cap": 0}

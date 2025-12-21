@@ -38,7 +38,13 @@ def _default_agent_metrics() -> Dict[str, float]:
     }
 
 
-def get_financial_metrics(symbol: str, *, trace_state: dict | None = None, as_of_date: str | None = None) -> Dict[str, Any]:
+def get_financial_metrics(
+    symbol: str,
+    *,
+    trace_state: dict | None = None,
+    as_of_date: str | None = None,
+    snapshot: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """获取财务指标数据"""
     logger.info(f"Getting financial indicators for {symbol}...")
     refresh_financial_indicators = get_cache_refresh_flag("market_data_agent", "financial_indicators")
@@ -51,13 +57,19 @@ def get_financial_metrics(symbol: str, *, trace_state: dict | None = None, as_of
             cutoff = None
     try:
         # ��ȡʵʱ�������ݣ�������ֵ�͹�ֵ���ʣ�
-        logger.info("Fetching market snapshot...")
-        try:
-            snapshot = get_market_snapshot(symbol, trace_state=trace_state, agent_name="market_data_agent", as_of_date=as_of_date)
-            logger.info("✓ Market snapshot prepared")
-        except Exception as snapshot_err:  # noqa: BLE001
-            logger.warning("Market snapshot unavailable: %s", snapshot_err)
-            snapshot = {}
+        if snapshot is None:
+            logger.info("Fetching market snapshot...")
+            try:
+                snapshot = get_market_snapshot(
+                    symbol,
+                    trace_state=trace_state,
+                    agent_name="market_data_agent",
+                    as_of_date=as_of_date,
+                )
+                logger.info("✓ Market snapshot prepared")
+            except Exception as snapshot_err:  # noqa: BLE001
+                logger.warning("Market snapshot unavailable: %s", snapshot_err)
+                snapshot = {}
         stock_data = {
             "总市值": snapshot.get("market_cap", 0),
             "流通市值": snapshot.get("market_cap", 0),
@@ -403,10 +415,22 @@ def get_financial_statements(symbol: str, *, as_of_date: str | None = None) -> D
         return [default_item, default_item]
 
 
-def get_market_data(symbol: str, *, trace_state: dict | None = None, as_of_date: str | None = None) -> Dict[str, Any]:
+def get_market_data(
+    symbol: str,
+    *,
+    trace_state: dict | None = None,
+    as_of_date: str | None = None,
+    snapshot: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """获取市场数据（自研引擎 + LLM 快照）"""
     try:
-        snapshot = get_market_snapshot(symbol, trace_state=trace_state, agent_name="market_data_agent", as_of_date=as_of_date)
+        if snapshot is None:
+            snapshot = get_market_snapshot(
+                symbol,
+                trace_state=trace_state,
+                agent_name="market_data_agent",
+                as_of_date=as_of_date,
+            )
         return {
             "market_cap": snapshot.get("market_cap", 0.0),
             "volume": snapshot.get("volume", 0.0),
