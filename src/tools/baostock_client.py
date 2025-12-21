@@ -136,3 +136,22 @@ def query_trade_dates(start_date, end_date) -> pd.DataFrame:
         return pd.DataFrame(columns=["calendar_date", "is_trading_day"])
     df = pd.DataFrame(rows, columns=rs.fields)
     return df
+
+
+def query_stock_basic(code: str) -> pd.DataFrame:
+    ensure_login()
+    rs = bs.query_stock_basic(code=code)
+    if rs.error_code == "10001001":  # not logged in
+        _logout()
+        ensure_login()
+        rs = bs.query_stock_basic(code=code)
+    if rs.error_code != "0":
+        raise RuntimeError(f"BaoStock stock basic query failed[{rs.error_code}]: {rs.error_msg}")
+
+    rows: List[List[str]] = []
+    while rs.error_code == "0" and rs.next():
+        rows.append(rs.get_row_data())
+    if not rows:
+        return pd.DataFrame(columns=rs.fields)
+    df = pd.DataFrame(rows, columns=rs.fields)
+    return df

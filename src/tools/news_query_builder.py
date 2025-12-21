@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from src.tools.openrouter_config import get_chat_completion
+from src.tools.stock_basic import enrich_symbol, get_stock_name
 from src.utils.api_utils import log_llm_interaction
 from src.utils.prompt_loader import load_prompt, format_prompt
 
@@ -113,8 +114,12 @@ def build_news_query(
     trace_state: Optional[dict] = None,
 ) -> str:
     mode = (os.getenv("NEWS_QUERY_MODE", "rule") or "rule").lower()
+    query_symbol = symbol
+    if agent_name != "macro_news_agent" and symbol not in {"000300", "沪深300", "CSI300"}:
+        company_name = get_stock_name(symbol)
+        query_symbol = enrich_symbol(symbol, company_name)
     if mode == "llm":
-        query = _llm_query(symbol, date, agent_name, trace_state)
+        query = _llm_query(query_symbol, date, agent_name, trace_state)
         if query:
             return query
-    return _rule_based_query(symbol, date, agent_name)
+    return _rule_based_query(query_symbol, date, agent_name)
