@@ -47,8 +47,18 @@ def researcher_bull_agent(state: AgentState):
 
     # Technical Analysis
     if technical_signals["signal"] == "bullish":
+        details = ""
+        # Extract technical details if available
+        if "reasoning" in technical_signals and isinstance(technical_signals["reasoning"], dict):
+            tech_reasons = []
+            for indicator, info in technical_signals["reasoning"].items():
+                if isinstance(info, dict) and info.get("signal") == "bullish":
+                    tech_reasons.append(f"{indicator}: {info.get('details', '')}")
+            if tech_reasons:
+                details = " (" + "; ".join(tech_reasons) + ")"
+
         bullish_points.append(
-            f"技术指标呈现多头动能，置信度 {technical_signals['confidence']}")
+            f"技术指标呈现多头动能，置信度 {technical_signals['confidence']}{details}")
         confidence_scores.append(
             float(str(technical_signals["confidence"]).replace("%", "")) / 100)
     else:
@@ -58,8 +68,18 @@ def researcher_bull_agent(state: AgentState):
 
     # Fundamental Analysis
     if fundamental_signals["signal"] == "bullish":
+        details = ""
+        # Extract fundamental details
+        if "reasoning" in fundamental_signals and isinstance(fundamental_signals["reasoning"], dict):
+            fund_reasons = []
+            for metric, info in fundamental_signals["reasoning"].items():
+                if isinstance(info, dict) and info.get("signal") == "bullish":
+                    fund_reasons.append(f"{info.get('details', '')}")
+            if fund_reasons:
+                details = " (" + "; ".join(fund_reasons) + ")"
+
         bullish_points.append(
-            f"基本面表现稳健，置信度 {fundamental_signals['confidence']}")
+            f"基本面表现稳健，置信度 {fundamental_signals['confidence']}{details}")
         confidence_scores.append(
             float(str(fundamental_signals["confidence"]).replace("%", "")) / 100)
     else:
@@ -69,8 +89,13 @@ def researcher_bull_agent(state: AgentState):
 
     # Sentiment Analysis
     if sentiment_signals["signal"] == "bullish":
+        reasoning_text = sentiment_signals.get("reasoning", "")
+        # Truncate if too long to avoid overwhelming
+        if isinstance(reasoning_text, str) and len(reasoning_text) > 100:
+            reasoning_text = reasoning_text[:100] + "..."
+
         bullish_points.append(
-            f"市场情绪偏正面，置信度 {sentiment_signals['confidence']}")
+            f"市场情绪偏正面，置信度 {sentiment_signals['confidence']}。{reasoning_text}")
         confidence_scores.append(
             float(str(sentiment_signals["confidence"]).replace("%", "")) / 100)
     else:
@@ -80,8 +105,18 @@ def researcher_bull_agent(state: AgentState):
 
     # Valuation Analysis
     if valuation_signals["signal"] == "bullish":
+        details = ""
+        # Extract valuation details
+        if "reasoning" in valuation_signals and isinstance(valuation_signals["reasoning"], dict):
+            val_reasons = []
+            for model, info in valuation_signals["reasoning"].items():
+                if isinstance(info, dict) and info.get("signal") == "bullish":
+                    val_reasons.append(f"{model}: {info.get('details', '')}")
+            if val_reasons:
+                details = " (" + "; ".join(val_reasons) + ")"
+
         bullish_points.append(
-            f"估值具备吸引力，置信度 {valuation_signals['confidence']}")
+            f"估值具备吸引力，置信度 {valuation_signals['confidence']}{details}")
         confidence_scores.append(
             float(str(valuation_signals["confidence"]).replace("%", "")) / 100)
     else:

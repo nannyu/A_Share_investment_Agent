@@ -134,12 +134,16 @@ workflow.add_edge("debate_room_agent", "risk_management_agent")
 workflow.add_edge("risk_management_agent", "macro_analyst_agent")
 
 # Edges to portfolio_management_agent (汇聚点)
-# macro_analyst_agent (end of main analysis path) and macro_news_agent (parallel news path)
-# both feed into portfolio_management_agent.
-# LangGraph will wait for both parent nodes to complete before running portfolio_management_agent.
-# Macro analyst should wait for both risk manager result and macro news summary
-workflow.add_edge("macro_news_agent", "macro_analyst_agent")
-workflow.add_edge("macro_analyst_agent", "portfolio_management_agent")
+# Macro analyst runs after risk manager. Macro news runs in parallel.
+# Portfolio should run once after BOTH macro_analyst_agent and macro_news_agent complete.
+def _route_to_portfolio_if_ready(state: AgentState):
+    meta = state.get("metadata", {})
+    if meta.get("macro_analyst_done") and meta.get("macro_news_done"):
+        return "portfolio_management_agent"
+    return END
+
+workflow.add_conditional_edges("macro_news_agent", _route_to_portfolio_if_ready)
+workflow.add_conditional_edges("macro_analyst_agent", _route_to_portfolio_if_ready)
 
 # Final node
 workflow.add_edge("portfolio_management_agent", END)

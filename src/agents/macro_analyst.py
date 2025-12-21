@@ -99,7 +99,10 @@ def macro_analyst_agent(state: AgentState):
             **data,
             "macro_analysis": message_content
         },
-        "metadata": state["metadata"],
+        "metadata": {
+            **state["metadata"],
+            "macro_analyst_done": True,
+        },
     }
 
 

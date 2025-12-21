@@ -389,5 +389,6 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
         "metadata": {
             **state["metadata"],
             f"{agent_name}_details": metadata_details,
+            "macro_news_done": True,
         },
     }
