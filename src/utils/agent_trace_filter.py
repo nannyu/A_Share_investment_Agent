@@ -54,6 +54,22 @@ _AGENT_DATA_KEYS: Dict[str, Iterable[str]] = {
     "risk_management_agent": ("risk_analysis", "debate_analysis", "technical_analysis"),
 }
 
+_AGENT_ALIASES: Dict[str, str] = {
+    # agent_endpoint names -> canonical keys above
+    "market_data": "market_data_agent",
+    "technical_analyst": "technical_analyst_agent",
+    "fundamentals": "fundamentals_agent",
+    "sentiment": "sentiment_agent",
+    "valuation": "valuation_agent",
+    "macro_news_agent": "macro_news_agent",
+    "macro_analyst": "macro_analyst_agent",
+    "researcher_bull": "researcher_bull_agent",
+    "researcher_bear": "researcher_bear_agent",
+    "debate_room": "debate_room_agent",
+    "portfolio_management": "portfolio_management_agent",
+    "risk_management": "risk_management_agent",
+}
+
 
 def _pick_keys(data: Dict[str, Any], keys: Iterable[str]) -> Dict[str, Any]:
     if not isinstance(data, dict):
@@ -69,8 +85,9 @@ def build_agent_trace_payload(state: Dict[str, Any], agent_name: str, stage: str
     metadata = state.get("metadata", {}) if isinstance(state.get("metadata"), dict) else {}
     data = state.get("data", {}) if isinstance(state.get("data"), dict) else {}
 
+    canonical_name = _AGENT_ALIASES.get(agent_name, agent_name)
     selected = _pick_keys(data, _BASE_KEYS)
-    selected.update(_pick_keys(data, _AGENT_DATA_KEYS.get(agent_name, ())))
+    selected.update(_pick_keys(data, _AGENT_DATA_KEYS.get(canonical_name, ())))
 
     filtered_metadata = {
         key: metadata.get(key)
@@ -81,6 +98,7 @@ def build_agent_trace_payload(state: Dict[str, Any], agent_name: str, stage: str
     return {
         "stage": stage,
         "agent_name": agent_name,
+        "canonical_agent": canonical_name,
         "metadata": filtered_metadata,
         "data": selected,
     }

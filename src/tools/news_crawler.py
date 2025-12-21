@@ -534,9 +534,9 @@ def get_news_sentiment(
     try:
         # 获取LLM响应
         if trace_state:
-            result = log_llm_interaction(trace_state)(
-                lambda: get_chat_completion([system_message, user_message])
-            )()
+            result = log_llm_interaction(trace_state)(get_chat_completion)(
+                [system_message, user_message]
+            )
         else:
             result = get_chat_completion([system_message, user_message])
 

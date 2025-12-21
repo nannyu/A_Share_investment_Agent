@@ -144,9 +144,7 @@ def _generate_snapshot(symbol: str, trace_state: dict | None = None, as_of_date:
     messages = _build_prompt(symbol, news_items)
     logger.info("🤖 正在调用 LLM 生成 %s 的市场快照...", symbol)
     if trace_state:
-        llm_response = log_llm_interaction(trace_state)(
-            lambda: get_chat_completion(messages)
-        )()
+        llm_response = log_llm_interaction(trace_state)(get_chat_completion)(messages)
     else:
         llm_response = get_chat_completion(messages)
     snapshot_raw = _parse_snapshot_response(llm_response or "{}")

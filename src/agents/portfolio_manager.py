@@ -214,15 +214,10 @@ def portfolio_management_agent(state: AgentState):
 
     llm_interaction_messages = [system_message, user_message]
     logger.info("🤖 Portfolio Manager 调用 LLM 生成决策...")
-    llm_response_content = get_chat_completion(llm_interaction_messages)
+    llm_response_content = log_llm_interaction(state)(get_chat_completion)(
+        llm_interaction_messages
+    )
     logger.info("✅ Portfolio Manager LLM 调用完成 (响应长度=%s)", len(llm_response_content or ""))
-
-    current_metadata = state["metadata"]
-    current_metadata["current_agent_name"] = agent_name
-
-    def get_llm_result_for_logging_wrapper():
-        return llm_response_content
-    log_llm_interaction(state)(get_llm_result_for_logging_wrapper)()
 
     if llm_response_content is None:
         show_agent_reasoning(

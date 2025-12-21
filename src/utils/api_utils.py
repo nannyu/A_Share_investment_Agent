@@ -37,7 +37,8 @@ from backend.utils.api_utils import (
     # serialize_for_api, # Unused
     safe_parse_json,  # Keep
     format_llm_request,  # Keep
-    format_llm_response  # Keep
+    format_llm_response,  # Keep
+    serialize_for_api,  # Keep
 )
 # from backend.utils.context_managers import workflow_run # Unused
 # from backend.services import execute_stock_analysis # Unused
@@ -207,18 +208,27 @@ def log_llm_interaction(state):
                 model = kwargs.get("model")
                 client_type = kwargs.get("client_type", "auto")
 
-                # 准备格式化的请求数据
+                # 准备格式化的请求数据（同时保留原始输入）
                 formatted_request = {
                     "caller": caller_info,
                     "messages": messages,
                     "model": model,
                     "client_type": client_type,
                     "arguments": format_llm_request(args),
-                    "kwargs": format_llm_request(kwargs) if kwargs else {}
+                    "kwargs": format_llm_request(kwargs) if kwargs else {},
+                    "raw": {
+                        "messages": serialize_for_api(messages),
+                        "model": model,
+                        "client_type": client_type,
+                        "args": serialize_for_api(args),
+                        "kwargs": serialize_for_api(kwargs) if kwargs else {},
+                    },
                 }
 
-                # 准备格式化的响应数据
+                # 准备格式化的响应数据（同时保留原始输出）
                 formatted_response = format_llm_response(result)
+                if isinstance(formatted_response, dict):
+                    formatted_response["raw"] = serialize_for_api(result)
 
                 # 记录到API状态
                 api_state.update_agent_data(

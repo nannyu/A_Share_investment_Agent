@@ -95,14 +95,13 @@ def risk_management_agent(state: AgentState):
         market_risk_score += 2
     elif max_drawdown < -0.10:
         market_risk_score += 1
-
     # 3. Position Size Limits
     # Consider total portfolio value, not just cash
     current_stock_value = portfolio['stock'] * prices_df['close'].iloc[-1]
     total_portfolio_value = portfolio['cash'] + current_stock_value
 
-    # Start with 25% max position of total portfolio
-    base_position_size = total_portfolio_value * 0.25
+    # Start with 100% max position of total portfolio (allow full investment)
+    base_position_size = total_portfolio_value * 1.0
 
     if market_risk_score >= 4:
         # Reduce position for high risk

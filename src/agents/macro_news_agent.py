@@ -295,9 +295,9 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
             news_payload = _format_prompt_payload(news_items)
             prompt = LLM_PROMPT_MACRO_ANALYSIS.replace("<<NEWS_JSON>>", news_payload)
             try:
-                llm_response = log_llm_interaction(state)(
-                    lambda: get_chat_completion([{"role": "user", "content": prompt}])
-                )()
+                llm_response = log_llm_interaction(state)(get_chat_completion)(
+                    [{"role": "user", "content": prompt}]
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.error("⚠️ 调用 LLM 生成宏观摘要失败: %s", exc)
                 llm_response = ""

@@ -93,7 +93,7 @@ def _llm_query(
     ]
 
     if trace_state:
-        result = log_llm_interaction(trace_state)(lambda: get_chat_completion(messages))()
+        result = log_llm_interaction(trace_state)(get_chat_completion)(messages)
     else:
         result = get_chat_completion(messages)
 

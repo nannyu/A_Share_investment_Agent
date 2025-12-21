@@ -158,9 +158,9 @@ def get_macro_news_analysis(
         # 获取LLM分析结果
         logger.info("🤖 正在调用LLM进行宏观分析...")
         if trace_state:
-            result = log_llm_interaction(trace_state)(
-                lambda: get_chat_completion([system_message, user_message])
-            )()
+            result = log_llm_interaction(trace_state)(get_chat_completion)(
+                [system_message, user_message]
+            )
         else:
             result = get_chat_completion([system_message, user_message])
         if result is None:

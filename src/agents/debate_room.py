@@ -121,10 +121,8 @@ def debate_room_agent(state: AgentState):
             {"role": "user", "content": llm_prompt},
         ]
 
-        # 使用log_llm_interaction装饰器记录LLM交互
-        llm_response = log_llm_interaction(state)(
-            lambda: get_chat_completion(messages)
-        )()
+        # 使用log_llm_interaction装饰器记录LLM交互（保留原始请求/响应）
+        llm_response = log_llm_interaction(state)(get_chat_completion)(messages)
 
         logger.info("LLM 返回响应完成")
 
