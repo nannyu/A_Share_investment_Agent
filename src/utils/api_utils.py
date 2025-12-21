@@ -45,8 +45,8 @@ from backend.utils.api_utils import (
 from backend.schemas import LLMInteractionLog  # Keep
 from backend.schemas import AgentExecutionLog  # Keep
 from src.utils.serialization import serialize_agent_state  # Keep
-from src.utils.trace_logger import trace_agent_io  # File-based trace for backtest
-from src.utils.agent_trace_filter import build_agent_trace_payload
+from src.utils.trace_logger import trace_agent_message  # File-based trace for backtest
+from src.utils.agent_trace_filter import build_agent_trace_payload, _AGENT_ALIASES  # type: ignore
 
 # 导入日志记录器
 try:
@@ -368,17 +368,35 @@ def agent_endpoint(agent_name: str, description: str = ""):
 
                 if trace_dir:
                     try:
-                        filtered_input = build_agent_trace_payload(
-                            serialized_input, agent_name, "input"
-                        )
-                        filtered_output = build_agent_trace_payload(
-                            serialized_output, agent_name, "output"
-                        )
-                        trace_agent_io(
+                        canonical_name = _AGENT_ALIASES.get(agent_name, agent_name)
+                        target_names = {
+                            agent_name,
+                            canonical_name,
+                            f"{canonical_name}_agent",
+                            f"{agent_name}_agent",
+                        }
+                        selected_message = None
+                        if isinstance(result, dict) and isinstance(result.get("messages"), list):
+                            for msg in reversed(result["messages"]):
+                                name = getattr(msg, "name", None)
+                                if name in target_names:
+                                    selected_message = msg
+                                    break
+                        message_payload = {
+                            "agent_name": agent_name,
+                            "canonical_agent": canonical_name,
+                            "content": getattr(selected_message, "content", None),
+                            "message_name": getattr(selected_message, "name", None),
+                        }
+                        if message_payload["content"] is None:
+                            # Fallback: include filtered output data if message wasn't found
+                            message_payload["fallback_output"] = build_agent_trace_payload(
+                                serialized_output, agent_name, "output"
+                            )
+                        trace_agent_message(
                             trace_dir,
                             agent_name,
-                            filtered_input,
-                            filtered_output,
+                            message_payload,
                             terminal_outputs,
                             reasoning_details,
                         )

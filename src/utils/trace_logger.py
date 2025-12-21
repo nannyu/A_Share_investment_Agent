@@ -22,19 +22,17 @@ def _append_jsonl(path: str, payload: Any) -> None:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-def trace_agent_io(
+def trace_agent_message(
     trace_dir: Optional[str],
     agent_name: str,
-    input_state: Any,
-    output_state: Any,
+    message_payload: Any,
     terminal_outputs: Optional[Iterable[str]] = None,
     reasoning_details: Optional[str] = None,
 ) -> None:
     if not trace_dir:
         return
     agent_dir = os.path.join(trace_dir, agent_name)
-    _safe_json_dump(os.path.join(agent_dir, "input.json"), input_state)
-    _safe_json_dump(os.path.join(agent_dir, "output.json"), output_state)
+    _safe_json_dump(os.path.join(agent_dir, "message.json"), message_payload)
     if reasoning_details:
         _safe_json_dump(os.path.join(agent_dir, "reasoning.json"), {"reasoning": reasoning_details})
     if terminal_outputs:
