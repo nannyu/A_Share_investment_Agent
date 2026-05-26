@@ -26,6 +26,7 @@ def get_stock_name(
     ttl_seconds: int = 30 * 24 * 3600,
     force_refresh: bool = False,
 ) -> Optional[str]:
+    # 股票基础信息缓存改为“无 TTL 常驻”；ttl_seconds 参数仅保留兼容性
     if not symbol:
         return None
 
@@ -36,7 +37,6 @@ def get_stock_name(
         cached = cache.fetch_records(
             table=STOCK_BASIC_TABLE,
             filters={"code": bs_symbol},
-            ttl_seconds=ttl_seconds,
             order_by='"缓存时间" DESC',
             limit=1,
         )

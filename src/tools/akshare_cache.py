@@ -114,6 +114,7 @@ def get_stock_spot_row(symbol: str, ttl_seconds: int = 600) -> Optional[pd.Serie
 def get_financial_indicators(
     symbol: str, start_year: str, ttl_seconds: int = 24 * 3600, force_refresh: bool = False
 ) -> pd.DataFrame:
+    # 财务指标缓存改为“无 TTL 常驻”；ttl_seconds 参数仅保留兼容性
     if force_refresh:
         logger.info("🔄 强制刷新财务指标缓存: %s", symbol)
 
@@ -121,7 +122,6 @@ def get_financial_indicators(
         cached = cache.fetch_records(
             table="stock_financial_analysis_indicator",
             filters={COL_CODE: symbol},
-            ttl_seconds=ttl_seconds,
             order_by=f'"{COL_DATE}" DESC',
         )
         if cached:
@@ -151,6 +151,7 @@ def get_financial_indicators(
 def get_financial_report(
     symbol: str, report_type: str, ttl_seconds: int = 7 * 24 * 3600, force_refresh: bool = False
 ) -> pd.DataFrame:
+    # 财务报表缓存改为“无 TTL 常驻”；ttl_seconds 参数仅保留兼容性
     if force_refresh:
         logger.info("🔄 强制刷新财务报表缓存: %s %s", symbol, report_type)
 
@@ -158,7 +159,6 @@ def get_financial_report(
         cached = cache.fetch_records(
             table="stock_financial_report_sina",
             filters={COL_CODE: symbol, COL_REPORT_TYPE: report_type},
-            ttl_seconds=ttl_seconds,
         )
         if cached:
             _log_cache_hit(f"stock_financial_report_sina[{report_type}]", symbol, len(cached))

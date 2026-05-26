@@ -265,57 +265,57 @@ $env:OPENAI_COMPATIBLE_MODEL='your-model-name'
 **基本运行 (只显示关键决策信息):**
 
 ```bash
-poetry run python src/main.py --ticker 000000 #修改成你想要测试的股票代码
+uv run python src/main.py --ticker 000000 # 修改成你想要测试的股票代码
 ```
 
 例如，分析股票代码为 `301155` 的情况：
 
 ```bash
-poetry run python src/main.py --ticker 301155
+uv run python src/main.py --ticker 301155
 ```
 
 **显示详细推理过程 (查看每个智能体的分析过程):**
 
 ```bash
-poetry run python src/main.py --ticker 000000 --show-reasoning #修改成你想要测试的股票代码
+uv run python src/main.py --ticker 000000 --show-reasoning # 修改成你想要测试的股票代码
 ```
 
 例如:
 
 ```bash
-poetry run python src/main.py --ticker 301155 --show-reasoning
+uv run python src/main.py --ticker 301155 --show-reasoning
 ```
 
 **回测功能**
 
 ```bash
-poetry run python src/backtester.py --ticker 301157 --start-date 2024-12-11 --end-date 2025-01-07 --num-of-news 20
+uv run python src/backtester.py --ticker 301157 --start-date 2024-12-11 --end-date 2025-01-07 --num-of-news 20
 ```
 
-回测功能支持以下参数：
+回测功能支持以下参数（以 `src/backtester.py` 当前实现为准）：
 
-- `ticker`: 股票代码
-- `start-date`: 回测开始日期（`YYYY-MM-DD`）
-- `end-date`: 回测结束日期（`YYYY-MM-DD`）
-- `initial-capital`: 初始资金（可选，默认为 `100,000`）
-- `num-of-news`: 情绪分析使用的新闻数量（可选，默认为 `5`，最大为 `100`）
+- `--ticker`: 股票代码（必需，例如 `600519`）
+- `--start-date`: 回测开始日期（可选，`YYYY-MM-DD`，默认 `90` 天前）
+- `--end-date`: 回测结束日期（可选，`YYYY-MM-DD`，默认昨天）
+- `--initial-capital`: 初始资金（可选，默认 `100000`）
+- `--initial-position`: 初始持仓股数（可选，默认 `0`）
+- `--num-of-news`: 每次调用工作流使用的新闻数量（可选，默认 `5`）
+- `--decision-interval`: 每 `N` 个交易日运行一次工作流（可选，默认 `1`）
+- `--plot`: 展示图表（可选，可能阻塞）
+- `--save-plot`: 保存图表到指定路径（可选，默认保存到回测日志目录）
 
-#### 参数说明
+#### 参数说明（命令行分析）
 
 - `--ticker`: 股票代码（必需）
-- `--show-reasoning`: 显示分析推理过程（可选，默认为 `false`）
-- `--initial-capital`: 初始现金金额（可选，默认为 `100,000`）
-- `--num-of-news`: 情绪分析使用的新闻数量（可选，默认为 `5`，最大为 `100`）
-- `--start-date`: 开始日期，格式 `YYYY-MM-DD`（可选）
-- `--end-date`: 结束日期，格式 `YYYY-MM-DD`（可选）
+- `--show-reasoning`: 显示分析推理过程（可选，默认 `false`）
 
 ### 2. 后端 API 服务模式
 
 此模式会启动一个 FastAPI 后端服务，允许通过 API 与系统交互，适合希望基于此后端开发自定义前端界面的用户。
 
 ```bash
-# 启动API服务
-poetry run python run_with_backend.py
+# 启动 API 服务
+uv run python run_with_backend.py
 ```
 
 启动后，可以通过浏览器访问 `http://localhost:8000/docs` 使用交互式 API 界面 (Swagger UI)。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -12,7 +13,7 @@ from src.tools.openrouter_config import get_chat_completion
 from src.utils.logging_config import setup_logger
 from src.utils.api_utils import log_llm_interaction
 from src.utils.prompt_loader import load_prompt, format_prompt
-from src.utils.config_loader import get_cache_refresh_flag
+from src.utils.config_loader import get_cache_refresh_flag, get_news_limits
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 CACHE_PATH = BASE_DIR / "data" / "market_data_cache.db"
@@ -21,6 +22,7 @@ SNAPSHOT_TTL_SECONDS = 24 * 3600
 
 logger = setup_logger("market_snapshot")
 cache = AkshareSQLiteCache(CACHE_PATH)
+_SNAPSHOT_SCHEMA_CHECKED = False
 
 
 def _build_prompt(symbol: str, news_items: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -130,10 +132,102 @@ def _sanitize_snapshot(data: Dict[str, Any]) -> Dict[str, float]:
         "summary": str(data.get("summary", "")).strip(),
     }
 
+
+def _ensure_snapshot_table_schema() -> None:
+    """确保 market_snapshot_cache 主键为 (symbol, cache_date)。"""
+    global _SNAPSHOT_SCHEMA_CHECKED
+    if _SNAPSHOT_SCHEMA_CHECKED:
+        return
+
+    conn = sqlite3.connect(CACHE_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (SNAPSHOT_TABLE,),
+        )
+        if not cur.fetchone():
+            _SNAPSHOT_SCHEMA_CHECKED = True
+            return
+
+        cur.execute(f'PRAGMA table_info("{SNAPSHOT_TABLE}")')
+        cols_info = cur.fetchall()  # cid, name, type, notnull, dflt_value, pk
+        if not cols_info:
+            _SNAPSHOT_SCHEMA_CHECKED = True
+            return
+
+        pk_cols = [row[1] for row in sorted(cols_info, key=lambda x: x[5]) if row[5] > 0]
+        if pk_cols == ["symbol", "cache_date"]:
+            _SNAPSHOT_SCHEMA_CHECKED = True
+            return
+
+        col_names = [row[1] for row in cols_info]
+        if "cache_date" not in col_names:
+            col_names.append("cache_date")
+
+        tmp_table = f"{SNAPSHOT_TABLE}_migrating"
+        cur.execute(f'DROP TABLE IF EXISTS "{tmp_table}"')
+
+        def _col_type(name: str) -> str:
+            for c in cols_info:
+                if c[1] == name and c[2]:
+                    return c[2]
+            return "TEXT"
+
+        col_defs = [f'"{name}" {_col_type(name)}' for name in col_names]
+        create_sql = (
+            f'CREATE TABLE "{tmp_table}" ('
+            + ", ".join(col_defs)
+            + ', PRIMARY KEY ("symbol", "cache_date"))'
+        )
+        cur.execute(create_sql)
+
+        insert_cols = ', '.join(f'"{c}"' for c in col_names)
+        select_parts = []
+        has_cache_date = any(c[1] == "cache_date" for c in cols_info)
+        has_generated_on = any(c[1] == "generated_on" for c in cols_info)
+
+        for c in col_names:
+            if c == "cache_date":
+                if has_cache_date:
+                    expr = 'COALESCE(NULLIF("cache_date",""), '
+                    expr += 'substr("generated_on",1,10), date("now"))'
+                    if not has_generated_on:
+                        expr = 'COALESCE(NULLIF("cache_date",""), date("now"))'
+                else:
+                    expr = 'COALESCE(substr("generated_on",1,10), date("now"))'
+                    if not has_generated_on:
+                        expr = 'date("now")'
+                select_parts.append(f'{expr} AS "cache_date"')
+            else:
+                select_parts.append(f'"{c}"')
+        select_sql = ", ".join(select_parts)
+
+        cur.execute(
+            f'INSERT INTO "{tmp_table}" ({insert_cols}) '
+            f'SELECT {select_sql} FROM "{SNAPSHOT_TABLE}"'
+        )
+        cur.execute(f'DROP TABLE "{SNAPSHOT_TABLE}"')
+        cur.execute(f'ALTER TABLE "{tmp_table}" RENAME TO "{SNAPSHOT_TABLE}"')
+        conn.commit()
+        logger.info("✅ 已完成 market_snapshot_cache 表结构迁移为主键(symbol, cache_date)")
+        _SNAPSHOT_SCHEMA_CHECKED = True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("❌ market_snapshot_cache 表结构迁移失败: %s", exc)
+        conn.rollback()
+    finally:
+        conn.close()
+
 def _generate_snapshot(symbol: str, trace_state: dict | None = None, as_of_date: str | None = None) -> Dict[str, Any]:
+    limits = get_news_limits()
+    try:
+        news_limit = max(1, int(limits.get("news_max_news", 10)))
+    except (TypeError, ValueError):
+        news_limit = 10
+
     news_items = get_stock_news(
         symbol,
-        max_news=20,
+        max_news=news_limit,
         date=as_of_date,
         agent_name="market_snapshot",
         trace_state=trace_state,
@@ -165,6 +259,8 @@ def get_market_snapshot(
     agent_name: str | None = None,
     as_of_date: str | None = None,
 ) -> Dict[str, Any]:
+    _ensure_snapshot_table_schema()
+
     refresh_snapshot = get_cache_refresh_flag(agent_name or "market_snapshot", "snapshot")
     if refresh_snapshot:
         logger.info("🔄 强制刷新市场快照缓存: %s", symbol)
@@ -185,8 +281,8 @@ def get_market_snapshot(
             return record
 
     snapshot = _generate_snapshot(symbol, trace_state=trace_state, as_of_date=cache_date)
-    record = {"symbol": symbol, **snapshot}
-    cache.upsert_records(SNAPSHOT_TABLE, [record], key_columns=["symbol"])
+    record = {"symbol": symbol, "cache_date": cache_date, **snapshot}
+    cache.upsert_records(SNAPSHOT_TABLE, [record], key_columns=["symbol", "cache_date"])
     logger.info("⚙️ Market snapshot refreshed for %s", symbol)
     return record
 

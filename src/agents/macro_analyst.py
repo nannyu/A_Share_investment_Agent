@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timedelta
 from src.tools.openrouter_config import get_chat_completion
 from src.utils.prompt_loader import load_prompt, format_prompt
+from src.utils.config_loader import get_news_limits
 
 # 设置日志记录
 logger = setup_logger('macro_analyst_agent')
@@ -24,10 +25,16 @@ def macro_analyst_agent(state: AgentState):
     # 获取 end_date 并传递给 get_stock_news
     end_date = data.get("end_date")  # 从 run_hedge_fund 传递来的 end_date
 
-    # 获取大量新闻数据（最多100条），传递正确的日期参数
+    limits = get_news_limits()
+    try:
+        news_limit = max(1, int(limits.get("news_max_news", 10)))
+    except (TypeError, ValueError):
+        news_limit = 10
+
+    # 获取新闻数据，数量由 config.json.news_limits.news_max_news 控制
     news_list = get_stock_news(
         symbol,
-        max_news=100,
+        max_news=news_limit,
         date=end_date,
         agent_name="macro_analyst_agent",
         trace_state=state,

@@ -65,6 +65,7 @@ class Backtester:
             self.portfolio = {"cash": config.initial_capital, "stock": 0}
         self.portfolio_values: list[Dict[str, Any]] = []
         self._initial_position_applied = False
+        self._performance_base_value: float | None = None
 
         self._api_call_count = 0
         self._api_window_start = time.time()
@@ -301,6 +302,7 @@ class Backtester:
         price_df = price_df.sort_values("date")
 
         last_decision: Dict[str, Any] = {"action": "hold", "quantity": 0}
+        traded_days = 0
 
         # 用前一交易日收盘价进行初始建仓（如果配置了初始持仓）
         if self.config.initial_position > 0 and not self._initial_position_applied:
@@ -350,7 +352,7 @@ class Backtester:
                 self.backtest_logger.warning("初始建仓失败: 未找到前一交易日收盘价")
                 print("初始建仓失败: 未找到前一交易日收盘价")
 
-        for idx, current_date in enumerate(dates):
+        for current_date in dates:
             current_date_str = current_date.strftime("%Y-%m-%d")
             day_rows = price_df.loc[price_df["date"] == pd.to_datetime(current_date_str)]
             if day_rows.empty:
@@ -361,27 +363,35 @@ class Backtester:
             quantity = 0
             output: Dict[str, Any] = {}
 
-            if idx % max(1, int(self.config.decision_interval)) == 0:
-                lookback_start = (current_date - timedelta(days=30)).strftime("%Y-%m-%d")
-                output = self._get_agent_decision(current_date_str, lookback_start)
-                last_decision = output.get("decision", last_decision) or last_decision
-                try:
-                    with open(self._decision_log_path, "a", encoding="utf-8") as f:
-                        f.write(
-                            json.dumps(
-                                {
-                                    "date": current_date_str,
-                                    "ticker": self.config.ticker,
-                                    "decision": dict(last_decision),
-                                    "response": output,
-                                    "raw_response": output.get("raw_response"),
-                                },
-                                ensure_ascii=False,
+            if traded_days % max(1, int(self.config.decision_interval)) == 0:
+                # 仅使用前一交易日作为决策截止，避免当日开盘成交时引入前视偏差
+                prev_rows = price_df.loc[price_df["date"] < pd.to_datetime(current_date_str)]
+                if not prev_rows.empty:
+                    decision_end = prev_rows.iloc[-1]["date"]
+                    decision_end_str = decision_end.strftime("%Y-%m-%d")
+                    lookback_start = (decision_end - timedelta(days=30)).strftime("%Y-%m-%d")
+                    output = self._get_agent_decision(decision_end_str, lookback_start)
+                    last_decision = output.get("decision", last_decision) or last_decision
+                    try:
+                        with open(self._decision_log_path, "a", encoding="utf-8") as f:
+                            f.write(
+                                json.dumps(
+                                    {
+                                        "date": current_date_str,
+                                        "decision_as_of_date": decision_end_str,
+                                        "ticker": self.config.ticker,
+                                        "decision": dict(last_decision),
+                                        "response": output,
+                                        "raw_response": output.get("raw_response"),
+                                    },
+                                    ensure_ascii=False,
+                                )
+                                + "\n"
                             )
-                            + "\n"
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    self.backtest_logger.warning("写入 LLM 决策 JSONL 失败: %s", exc)
+                    except Exception as exc:  # noqa: BLE001
+                        self.backtest_logger.warning("写入 LLM 决策 JSONL 失败: %s", exc)
+                else:
+                    self.backtest_logger.warning("首个交易日缺少前序行情，使用 HOLD 决策")
             action = str(last_decision.get("action", "hold") or "hold")
             quantity = int(last_decision.get("quantity", 0) or 0)
 
@@ -410,6 +420,8 @@ class Backtester:
             self.backtest_logger.info("实际成交数量: %s", executed_qty)
             total_value = float(self.portfolio["cash"]) + float(self.portfolio["stock"]) * current_price
             self.portfolio["portfolio_value"] = total_value
+            if self._performance_base_value is None and total_value > 0:
+                self._performance_base_value = total_value
 
             if self.portfolio_values:
                 daily_return = (total_value / self.portfolio_values[-1]["Portfolio Value"] - 1) * 100
@@ -437,6 +449,7 @@ class Backtester:
             self.portfolio_values.append(
                 {"Date": current_date, "Portfolio Value": total_value, "Daily Return": daily_return}
             )
+            traded_days += 1
 
 
     def analyze_performance(self) -> pd.DataFrame:
@@ -445,19 +458,26 @@ class Backtester:
             self.logger.warning("No performance data to analyze.")
             return performance_df
 
+        base_value = float(self._performance_base_value or 0.0)
+        if base_value <= 0:
+            base_value = float(self.config.initial_capital or 0.0)
+        if base_value <= 0:
+            first_value = float(performance_df["Portfolio Value"].iloc[0])
+            base_value = first_value if first_value > 0 else 1.0
+
         performance_df["Cumulative Return"] = (
-            performance_df["Portfolio Value"] / float(self.config.initial_capital) - 1
+            performance_df["Portfolio Value"] / base_value - 1
         ) * 100
 
         total_return = (
-            float(self.portfolio.get("portfolio_value", self.config.initial_capital)) - float(self.config.initial_capital)
-        ) / float(self.config.initial_capital)
+            float(self.portfolio.get("portfolio_value", base_value)) - base_value
+        ) / base_value
         print(f"\n总收益率: {total_return * 100:.2f}%")
 
         self.backtest_logger.info("\n" + "=" * 50)
         self.backtest_logger.info("回测结果汇总")
         self.backtest_logger.info("=" * 50)
-        self.backtest_logger.info(f"初始资金: {self.config.initial_capital:,.2f}")
+        self.backtest_logger.info(f"收益基准: {base_value:,.2f}")
         self.backtest_logger.info(f"最终总值: {self.portfolio.get('portfolio_value', 0):,.2f}")
         self.backtest_logger.info(f"总收益率: {total_return * 100:.2f}%")
         self.backtest_logger.info(f"最终持仓: {int(self.portfolio.get('stock', 0))} 股")

@@ -116,34 +116,30 @@ workflow.add_edge("market_data_agent", "valuation_agent")
 # macro_news_agent 也从 market_data_agent 并行出来
 workflow.add_edge("market_data_agent", "macro_news_agent")
 
-# Main analysis path (technical, fundamentals, sentiment, valuation -> researchers -> ... -> macro_analyst)
-workflow.add_edge("technical_analyst_agent", "researcher_bull_agent")
-workflow.add_edge("fundamentals_agent", "researcher_bull_agent")
-workflow.add_edge("sentiment_agent", "researcher_bull_agent")
-workflow.add_edge("valuation_agent", "researcher_bull_agent")
+# Main analysis path: four analysts (fan-in) -> two researchers (fan-in) -> debate room
+workflow.add_edge(
+    ["technical_analyst_agent", "fundamentals_agent", "sentiment_agent", "valuation_agent"],
+    "researcher_bull_agent",
+)
+workflow.add_edge(
+    ["technical_analyst_agent", "fundamentals_agent", "sentiment_agent", "valuation_agent"],
+    "researcher_bear_agent",
+)
 
-workflow.add_edge("technical_analyst_agent", "researcher_bear_agent")
-workflow.add_edge("fundamentals_agent", "researcher_bear_agent")
-workflow.add_edge("sentiment_agent", "researcher_bear_agent")
-workflow.add_edge("valuation_agent", "researcher_bear_agent")
-
-workflow.add_edge("researcher_bull_agent", "debate_room_agent")
-workflow.add_edge("researcher_bear_agent", "debate_room_agent")
+workflow.add_edge(
+    ["researcher_bull_agent", "researcher_bear_agent"],
+    "debate_room_agent",
+)
 
 workflow.add_edge("debate_room_agent", "risk_management_agent")
 workflow.add_edge("risk_management_agent", "macro_analyst_agent")
 
 # Edges to portfolio_management_agent (汇聚点)
-# Macro analyst runs after risk manager. Macro news runs in parallel.
-# Portfolio should run once after BOTH macro_analyst_agent and macro_news_agent complete.
-def _route_to_portfolio_if_ready(state: AgentState):
-    meta = state.get("metadata", {})
-    if meta.get("macro_analyst_done") and meta.get("macro_news_done"):
-        return "portfolio_management_agent"
-    return END
-
-workflow.add_conditional_edges("macro_news_agent", _route_to_portfolio_if_ready)
-workflow.add_conditional_edges("macro_analyst_agent", _route_to_portfolio_if_ready)
+# Portfolio runs once after BOTH macro_analyst_agent and macro_news_agent complete.
+workflow.add_edge(
+    ["macro_analyst_agent", "macro_news_agent"],
+    "portfolio_management_agent",
+)
 
 # Final node
 workflow.add_edge("portfolio_management_agent", END)

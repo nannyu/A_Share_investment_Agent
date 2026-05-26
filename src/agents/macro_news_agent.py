@@ -10,7 +10,7 @@ from src.tools.news_crawler import get_stock_news
 from src.tools.openrouter_config import get_chat_completion
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
 from src.utils.prompt_loader import load_prompt
-from src.utils.config_loader import get_cache_refresh_flag
+from src.utils.config_loader import get_cache_refresh_flag, get_news_limits
 from src.database import AkshareSQLiteCache
 from src.tools.akshare_cache import CACHE_PATH
 from src.utils.logging_config import setup_logger
@@ -218,6 +218,11 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
     agent_name = "macro_news_agent"
     show_workflow_status(f"{agent_name}: --- Executing Macro News Agent ---")
     symbol = "000300"
+    limits = get_news_limits()
+    try:
+        news_limit = max(1, int(limits.get("news_max_news", 10)))
+    except (TypeError, ValueError):
+        news_limit = 10
     today_str = datetime.now().strftime("%Y-%m-%d")
     cache_date = state.get("data", {}).get("end_date") or today_str
 
@@ -273,7 +278,7 @@ def macro_news_agent(state: AgentState) -> Dict[str, Any]:
         try:
             news_items = get_stock_news(
                 symbol,
-                max_news=100,
+                max_news=news_limit,
                 date=cache_date,
                 agent_name=agent_name,
                 trace_state=state,

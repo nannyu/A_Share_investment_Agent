@@ -7,6 +7,7 @@ from src.agents.state import AgentState, show_agent_reasoning, show_workflow_sta
 from src.tools.news_crawler import get_stock_news, get_news_sentiment
 from src.utils.logging_config import setup_logger
 from src.utils.api_utils import agent_endpoint, log_llm_interaction
+from src.utils.config_loader import get_news_limits
 
 logger = setup_logger("sentiment_agent")
 
@@ -20,7 +21,11 @@ def sentiment_agent(state: AgentState):
     symbol = data["ticker"]
     logger.info(f"正在分析股票: {symbol}")
 
-    num_of_news = data.get("num_of_news", 20)
+    limits = get_news_limits()
+    try:
+        num_of_news = max(1, int(limits.get("news_max_news", 10)))
+    except (TypeError, ValueError):
+        num_of_news = 10
     end_date = data.get("end_date")
 
     news_list = get_stock_news(
